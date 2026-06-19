@@ -14,18 +14,22 @@ import (
 	"net/smtp"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	yaml "gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	ListenAddr      string
-	UpstreamBaseURL string
-	ProxyAPIKey     string
-	UpstreamAPIKeys []string
+	ListenAddr          string
+	UpstreamBaseURL     string
+	ProxyAPIKey         string
+	UpstreamAPIKeys     []string
+	MaxRequestBodyBytes int64
 
 	SMTP SMTPConfig
 }
@@ -42,38 +46,179 @@ type SMTPConfig struct {
 }
 
 func loadConfig() (Config, error) {
-	proxyKey := strings.TrimSpace(os.Getenv("PROXY_API_KEY"))
-	if proxyKey == "" {
+	cfg := defaultConfig()
+	if path, ok, err := resolveConfigPath(); err != nil {
+		return Config{}, err
+	} else if ok {
+		fileCfg, err := loadYAMLConfig(path)
+		if err != nil {
+			return Config{}, err
+		}
+		mergeConfig(&cfg, fileCfg)
+	}
+	applyEnvOverrides(&cfg)
+	if strings.TrimSpace(cfg.ProxyAPIKey) == "" {
 		return Config{}, errors.New("PROXY_API_KEY is required")
 	}
-	upKeysRaw := strings.Split(os.Getenv("OPENCODE_GO_API_KEYS"), ",")
-	var upKeys []string
-	for _, k := range upKeysRaw {
-		if s := strings.TrimSpace(k); s != "" {
-			upKeys = append(upKeys, s)
-		}
-	}
-	if len(upKeys) == 0 {
+	if len(cfg.UpstreamAPIKeys) == 0 {
 		return Config{}, errors.New("OPENCODE_GO_API_KEYS is required")
 	}
-	listen := strings.TrimSpace(os.Getenv("LISTEN_ADDR"))
-	if listen == "" {
-		listen = ":8080"
-	}
-	upstream := strings.TrimSpace(os.Getenv("UPSTREAM_BASE_URL"))
-	if upstream == "" {
-		upstream = "https://opencode.ai/zen/go/v1"
-	}
-	port, _ := strconv.Atoi(defaultString(os.Getenv("SMTP_PORT"), "25"))
-	return Config{ListenAddr: listen, UpstreamBaseURL: strings.TrimRight(upstream, "/"), ProxyAPIKey: proxyKey, UpstreamAPIKeys: upKeys, SMTP: SMTPConfig{Host: os.Getenv("SMTP_HOST"), Port: port, Username: os.Getenv("SMTP_USERNAME"), Password: os.Getenv("SMTP_PASSWORD"), From: os.Getenv("SMTP_FROM"), To: os.Getenv("SMTP_TO"), TLS: parseBool(os.Getenv("SMTP_TLS")), StartTLS: parseBool(os.Getenv("SMTP_STARTTLS"))}}, nil
+	return cfg, nil
 }
 
-func defaultString(v, d string) string {
-	if strings.TrimSpace(v) == "" {
-		return d
-	}
-	return v
+func defaultConfig() Config {
+	return Config{ListenAddr: ":8080", UpstreamBaseURL: "https://opencode.ai/zen/go/v1", MaxRequestBodyBytes: 20 << 20, SMTP: SMTPConfig{Port: 25}}
 }
+
+func resolveConfigPath() (string, bool, error) {
+	if explicit := strings.TrimSpace(os.Getenv("SWITCHBOARD_GO_CONFIG")); explicit != "" {
+		if _, err := os.Stat(explicit); err != nil {
+			return "", false, fmt.Errorf("read SWITCHBOARD_GO_CONFIG: %w", err)
+		}
+		return explicit, true, nil
+	}
+	home, _ := os.UserHomeDir()
+	paths := []string{}
+	if home != "" {
+		paths = append(paths, filepath.Join(home, ".config", "switchboard-go", "config.yaml"))
+	}
+	paths = append(paths, "/etc/switchboard-go/config.yaml")
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return p, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+type yamlConfig struct {
+	Server struct {
+		ListenAddr  string `yaml:"listen_addr"`
+		ProxyAPIKey string `yaml:"proxy_api_key"`
+	} `yaml:"server"`
+	Upstream struct {
+		BaseURL string   `yaml:"base_url"`
+		APIKeys []string `yaml:"api_keys"`
+	} `yaml:"upstream"`
+	SMTP struct {
+		Host     string `yaml:"host"`
+		Username string `yaml:"username"`
+		Password string `yaml:"password"`
+		From     string `yaml:"from"`
+		To       string `yaml:"to"`
+		Port     int    `yaml:"port"`
+		TLS      bool   `yaml:"tls"`
+		StartTLS bool   `yaml:"starttls"`
+	} `yaml:"smtp"`
+	Limits struct {
+		MaxRequestBodyBytes int64 `yaml:"max_request_body_bytes"`
+	} `yaml:"limits"`
+}
+
+func loadYAMLConfig(path string) (Config, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("read config file: %w", err)
+	}
+	var yc yamlConfig
+	if err := yaml.Unmarshal(b, &yc); err != nil {
+		return Config{}, fmt.Errorf("parse config file: %w", err)
+	}
+	return Config{ListenAddr: yc.Server.ListenAddr, UpstreamBaseURL: yc.Upstream.BaseURL, ProxyAPIKey: yc.Server.ProxyAPIKey, UpstreamAPIKeys: yc.Upstream.APIKeys, MaxRequestBodyBytes: yc.Limits.MaxRequestBodyBytes, SMTP: SMTPConfig{Host: yc.SMTP.Host, Port: yc.SMTP.Port, Username: yc.SMTP.Username, Password: yc.SMTP.Password, From: yc.SMTP.From, To: yc.SMTP.To, TLS: yc.SMTP.TLS, StartTLS: yc.SMTP.StartTLS}}, nil
+}
+
+func mergeConfig(dst *Config, src Config) {
+	if src.ListenAddr != "" {
+		dst.ListenAddr = src.ListenAddr
+	}
+	if src.UpstreamBaseURL != "" {
+		dst.UpstreamBaseURL = src.UpstreamBaseURL
+	}
+	if src.ProxyAPIKey != "" {
+		dst.ProxyAPIKey = src.ProxyAPIKey
+	}
+	if len(src.UpstreamAPIKeys) > 0 {
+		dst.UpstreamAPIKeys = append([]string(nil), src.UpstreamAPIKeys...)
+	}
+	if src.MaxRequestBodyBytes > 0 {
+		dst.MaxRequestBodyBytes = src.MaxRequestBodyBytes
+	}
+	if src.SMTP.Host != "" {
+		dst.SMTP.Host = src.SMTP.Host
+	}
+	if src.SMTP.Port != 0 {
+		dst.SMTP.Port = src.SMTP.Port
+	}
+	if src.SMTP.Username != "" {
+		dst.SMTP.Username = src.SMTP.Username
+	}
+	if src.SMTP.Password != "" {
+		dst.SMTP.Password = src.SMTP.Password
+	}
+	if src.SMTP.From != "" {
+		dst.SMTP.From = src.SMTP.From
+	}
+	if src.SMTP.To != "" {
+		dst.SMTP.To = src.SMTP.To
+	}
+	dst.SMTP.TLS = src.SMTP.TLS || dst.SMTP.TLS
+	dst.SMTP.StartTLS = src.SMTP.StartTLS || dst.SMTP.StartTLS
+}
+
+func applyEnvOverrides(cfg *Config) {
+	if v := strings.TrimSpace(os.Getenv("LISTEN_ADDR")); v != "" {
+		cfg.ListenAddr = v
+	}
+	if v := strings.TrimSpace(os.Getenv("UPSTREAM_BASE_URL")); v != "" {
+		cfg.UpstreamBaseURL = strings.TrimRight(v, "/")
+	}
+	if v := strings.TrimSpace(os.Getenv("PROXY_API_KEY")); v != "" {
+		cfg.ProxyAPIKey = v
+	}
+	if v := strings.TrimSpace(os.Getenv("OPENCODE_GO_API_KEYS")); v != "" {
+		var keys []string
+		for _, k := range strings.Split(v, ",") {
+			if s := strings.TrimSpace(k); s != "" {
+				keys = append(keys, s)
+			}
+		}
+		if len(keys) > 0 {
+			cfg.UpstreamAPIKeys = keys
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("MAX_REQUEST_BODY_BYTES")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			cfg.MaxRequestBodyBytes = n
+		}
+	}
+	if v := os.Getenv("SMTP_HOST"); v != "" {
+		cfg.SMTP.Host = v
+	}
+	if v := os.Getenv("SMTP_PORT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.SMTP.Port = n
+		}
+	}
+	if v := os.Getenv("SMTP_USERNAME"); v != "" {
+		cfg.SMTP.Username = v
+	}
+	if v := os.Getenv("SMTP_PASSWORD"); v != "" {
+		cfg.SMTP.Password = v
+	}
+	if v := os.Getenv("SMTP_FROM"); v != "" {
+		cfg.SMTP.From = v
+	}
+	if v := os.Getenv("SMTP_TO"); v != "" {
+		cfg.SMTP.To = v
+	}
+	if v := os.Getenv("SMTP_TLS"); v != "" {
+		cfg.SMTP.TLS = parseBool(v)
+	}
+	if v := os.Getenv("SMTP_STARTTLS"); v != "" {
+		cfg.SMTP.StartTLS = parseBool(v)
+	}
+}
+
 func parseBool(v string) bool { b, _ := strconv.ParseBool(strings.TrimSpace(v)); return b }
 
 type KeyState string
@@ -278,7 +423,7 @@ func (a *App) handleAdmin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) proxyV1(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 20<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, a.config.MaxRequestBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		if strings.Contains(err.Error(), "request body too large") {

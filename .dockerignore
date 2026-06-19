@@ -1,0 +1,6 @@
+.git
+.github
+*.log
+bin/
+tmp/
+switchboard-go
