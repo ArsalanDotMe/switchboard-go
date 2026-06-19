@@ -19,6 +19,21 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Remove existing release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          gh release view "$TAG_NAME" --json assets --jq '.assets[].name' |
+            while IFS= read -r asset; do
+              if [ -n "$asset" ]; then
+                gh release delete-asset "$TAG_NAME" "$asset" --yes
+              fi
+            done
       - uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
