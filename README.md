@@ -4,200 +4,56 @@
 
 <h1 align="center">Switchboard Go</h1>
 
-Switchboard Go is a small Go reverse proxy for the OpenCode Go API. It exposes
-an OpenAI-compatible local endpoint, protects it with your own API key, and
-cycles through multiple upstream OpenCode Go API keys when one is exhausted.
+Switchboard Go is a small local proxy for the OpenCode Go API.
 
-It is designed to run on a trusted server in your local network so OpenAI-
-compatible tools can use one stable `base_url` while Switchboard Go handles
-upstream key failover.
+It gives OpenAI-compatible tools one stable local endpoint and automatically
+cycles through your upstream OpenCode Go API keys when one is exhausted.
 
-## Features
-
-- OpenAI-compatible `/v1/*` reverse proxy
-- Works with common OpenAI-compatible clients and tools via `base_url`
-- Local proxy authentication with `Authorization: Bearer <PROXY_API_KEY>`
-- Upstream OpenCode Go key rotation from YAML config or env vars
-- Automatic failover on quota/usage-exhausted `429` responses
-- Cyclic key selection: after the last key, rotation loops back to the first
-- Inferred key status endpoint at `/admin/status`
-- Active validation endpoint at `/admin/validate-keys`
-- Unauthenticated readiness endpoint at `/readyz`
-- SMTP notifications when a key is exhausted and when all keys are exhausted
-- YAML config file support with environment-variable overrides
-- Configurable max request body size
-- Streaming-friendly proxying: no full-response timeout on upstream responses
-- Dockerfile included
-- Small Go binary deployment
-
-## How it works
-
-Clients call this proxy as if it were an OpenAI-compatible API:
+Most users should run it on their own computer:
 
 ```text
-OpenAI-compatible tool -> Switchboard Go -> https://opencode.ai/zen/go/v1
+OpenAI-compatible app -> http://127.0.0.1:8080/v1 -> OpenCode Go
 ```
 
-Incoming `/v1` paths are stripped before forwarding to the configured upstream
-base URL:
+## Why use it?
 
-```text
-GET  /v1/models           -> GET  https://opencode.ai/zen/go/v1/models
-POST /v1/chat/completions -> POST https://opencode.ai/zen/go/v1/chat/completions
-```
-
-When an upstream key returns a quota/usage-exhausted `429`, Switchboard Go marks
-that key as exhausted, sends a best-effort SMTP notification, and retries the
-same request with the next non-exhausted key. If every key is exhausted, it
-returns an OpenAI-style `429` JSON error.
-
-Authentication failures on `/v1/*` and `/admin/*` return an OpenAI-style JSON
-error envelope with HTTP 401.
-
-## Requirements
-
-- Go 1.22 or newer for source builds
-- One or more OpenCode Go API keys
-- Optional SMTP server for notifications
-- Optional Docker for container deployment
+- One local OpenAI-compatible `/v1/*` endpoint
+- One proxy API key for your tools
+- Multiple upstream OpenCode Go keys behind the scenes
+- Automatic failover when an upstream key is exhausted
+- Optional YAML config, Docker, admin status, and SMTP alerts
 
 ## Install
 
-### Pre-built binaries
-
-Pre-built binaries are attached to each GitHub Release for Linux, macOS, and
-Windows.
-
-Download the archive for your platform from:
+Download a binary from GitHub Releases:
 
 ```text
 https://github.com/ArsalanDotMe/switchboard-go/releases
 ```
 
-Linux x86_64 example, verified in a minimal Ubuntu 24.04 container running as
-root:
+Linux x86_64 example:
 
 ```bash
-apt-get update
-apt-get install -y ca-certificates curl
 curl -LO https://github.com/ArsalanDotMe/switchboard-go/releases/download/v1.0.0/switchboard-go_Linux_x86_64.tar.gz
 curl -LO https://github.com/ArsalanDotMe/switchboard-go/releases/download/v1.0.0/checksums.txt
 sha256sum --check --ignore-missing checksums.txt
 tar -xzf switchboard-go_Linux_x86_64.tar.gz
 install -m 0755 switchboard-go /usr/local/bin/switchboard-go
-PROXY_API_KEY=local-test-key OPENCODE_GO_API_KEYS=upstream-test-key switchboard-go validate-config
 ```
 
-Published release assets include:
+Or build from source:
 
-- `switchboard-go_Linux_x86_64.tar.gz`
-- `switchboard-go_Linux_arm64.tar.gz`
-- `switchboard-go_Darwin_x86_64.tar.gz`
-- `switchboard-go_Darwin_arm64.tar.gz`
-- `switchboard-go_Windows_x86_64.zip`
-- `checksums.txt`
-
-## Configuration
-
-Switchboard Go supports both YAML config files and environment variables.
-
-Configuration precedence, from lowest to highest:
-
-1. Built-in defaults
-2. YAML config file
-3. Environment variables
-
-This lets you keep normal server settings in a config file while injecting
-secrets through environment variables, systemd environment files, Docker secrets,
-or your deployment platform.
-
-### Config file discovery
-
-Switchboard Go looks for a config file in this order:
-
-1. `SWITCHBOARD_GO_CONFIG`, if set
-2. `~/.config/switchboard-go/config.yaml`, if it exists
-3. `/etc/switchboard-go/config.yaml`, if it exists
-4. No config file
-
-If `SWITCHBOARD_GO_CONFIG` is set, the file must exist and be valid YAML. Missing
-or invalid explicit config files are startup errors.
-
-### YAML example
-
-```yaml
-server:
-  listen_addr: "127.0.0.1:8080"
-  proxy_api_key: "replace-with-a-long-random-local-key"
-
-upstream:
-  base_url: "https://opencode.ai/zen/go/v1"
-  api_keys:
-    - "sk-first"
-    - "sk-second"
-    - "sk-third"
-
-smtp:
-  host: "smtp.example.com"
-  port: 587
-  username: "alerts@example.com"
-  password: "your-smtp-password"
-  from: "alerts@example.com"
-  to: "you@example.com"
-  tls: false
-  starttls: true
-
-limits:
-  max_request_body_bytes: 20971520
+```bash
+go build -o switchboard-go .
 ```
-
-Recommended user config path: `~/.config/switchboard-go/config.yaml`.
-
-Recommended system config path: `/etc/switchboard-go/config.yaml`.
-
-Use restrictive permissions, such as `0600`, for config files containing
-secrets.
-
-### Environment variables
-
-| Variable | Required | Default | Description |
-| --- | --- | --- | --- |
-| `SWITCHBOARD_GO_CONFIG` | No | | Explicit YAML config path. |
-| `PROXY_API_KEY` | Yes\* | | API key clients must use to access this proxy. |
-| `OPENCODE_GO_API_KEYS` | Yes\* | | Comma-separated OpenCode Go API keys. |
-| `LISTEN_ADDR` | No | `:8080` | HTTP listen address. Use `127.0.0.1:8080` for local-only access. |
-| `UPSTREAM_BASE_URL` | No | `https://opencode.ai/zen/go/v1` | OpenAI-compatible OpenCode Go upstream base URL. |
-| `MAX_REQUEST_BODY_BYTES` | No | `20971520` | Maximum request body size. Requests above this return `413`. |
-| `SMTP_HOST` | No | | SMTP host for notifications. |
-| `SMTP_PORT` | No | `25` | SMTP port. |
-| `SMTP_USERNAME` | No | | SMTP username. If empty, SMTP AUTH is skipped. |
-| `SMTP_PASSWORD` | No | | SMTP password. |
-| `SMTP_FROM` | No | | Sender email address. Required for notifications. |
-| `SMTP_TO` | No | | Recipient email address. Required for notifications. |
-| `SMTP_TLS` | No | `false` | Use implicit TLS when connecting to SMTP. |
-| `SMTP_STARTTLS` | No | `false` | Use STARTTLS if the server advertises it. |
-
-\* Required unless provided by YAML config.
-
-Notifications are disabled unless `SMTP_HOST`, `SMTP_FROM`, and `SMTP_TO` are
-all set.
 
 ## Quick start
-
-With environment variables only:
 
 ```bash
 export PROXY_API_KEY="replace-with-a-long-random-local-key"
 export OPENCODE_GO_API_KEYS="sk-first,sk-second,sk-third"
 export LISTEN_ADDR="127.0.0.1:8080"
 
-switchboard-go
-```
-
-With a YAML config file:
-
-```bash
-export SWITCHBOARD_GO_CONFIG="$HOME/.config/switchboard-go/config.yaml"
 switchboard-go
 ```
 
@@ -210,17 +66,16 @@ curl http://127.0.0.1:8080/v1/models \
   -H "Authorization: Bearer $PROXY_API_KEY"
 ```
 
-## OpenAI-compatible client setup
+## Use it from an OpenAI-compatible client
 
-Point your client at Switchboard Go and use the proxy API key, not your upstream
-OpenCode Go key.
+Use the proxy key, not your upstream OpenCode Go key:
 
 ```bash
 export OPENAI_BASE_URL="http://127.0.0.1:8080/v1"
 export OPENAI_API_KEY="$PROXY_API_KEY"
 ```
 
-Example chat completion:
+Example request:
 
 ```bash
 curl http://127.0.0.1:8080/v1/chat/completions \
@@ -233,374 +88,52 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   }'
 ```
 
-Streaming requests are proxied as normal HTTP streams:
+For opencode and Pi Coding Agent examples, see
+[docs/agent-config.md](docs/agent-config.md).
 
-```bash
-curl -N http://127.0.0.1:8080/v1/chat/completions \
-  -H "Authorization: Bearer $PROXY_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "minimax-m3",
-    "stream": true,
-    "messages": [{"role": "user", "content": "Write a short poem"}]
-  }'
-```
+## Common settings
 
-## Agent harness setup
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `PROXY_API_KEY` | Yes | | Key clients use to access Switchboard Go. |
+| `OPENCODE_GO_API_KEYS` | Yes | | Comma-separated upstream OpenCode Go API keys. |
+| `LISTEN_ADDR` | No | `:8080` | Use `127.0.0.1:8080` for local-only access. |
+| `UPSTREAM_BASE_URL` | No | `https://opencode.ai/zen/go/v1` | OpenCode Go upstream base URL. |
 
-Use the Switchboard proxy API key in client configs, not an upstream OpenCode Go
-key.
+YAML config is also supported. See
+[docs/configuration.md](docs/configuration.md).
 
-### opencode
+## Admin endpoints
 
-Tested with `opencode-ai` 1.17.8 in a fresh `node:22-bookworm-slim` Docker
-container.
+Use `Authorization: Bearer $PROXY_API_KEY`:
 
-Create or edit `~/.config/opencode/opencode.json`. Preserve any existing keys
-and merge in the `provider` entry plus the default `model` if desired:
+- `GET /admin/status`
+- `POST /admin/validate-keys`
 
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "switchboard": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Switchboard",
-      "options": {
-        "baseURL": "https://switchboard.patari.us.kg/v1",
-        "apiKey": "{env:SWITCHBOARD_PROXY_API_KEY}"
-      },
-      "models": {
-        "glm-5.1": {
-          "name": "GLM-5.1",
-          "reasoning": true,
-          "limit": {
-            "context": 202752,
-            "output": 32768
-          }
-        }
-      }
-    }
-  },
-  "model": "switchboard/glm-5.1"
-}
-```
+Health checks:
 
-Then export the proxy key before starting opencode:
+- `GET /healthz`
+- `GET /readyz`
 
-```bash
-export SWITCHBOARD_PROXY_API_KEY="<SWITCHBOARD_PROXY_API_KEY>"
-```
+See [docs/admin-api.md](docs/admin-api.md).
 
-Verify:
+## More docs
 
-```bash
-opencode models switchboard
-opencode run --model switchboard/glm-5.1 "Reply with exactly: switchboard ok"
-```
-
-Expected final response:
-
-```text
-switchboard ok
-```
-
-Restart opencode after changing config; running sessions keep the old config.
-
-### Pi Coding Agent
-
-Create or edit `~/.pi/agent/models.json`:
-
-```json
-{
-  "providers": {
-    "switchboard": {
-      "name": "Switchboard",
-      "baseUrl": "https://switchboard.patari.us.kg/v1",
-      "api": "openai-completions",
-      "apiKey": "<SWITCHBOARD_PROXY_API_KEY>",
-      "compat": {
-        "maxTokensField": "max_tokens"
-      },
-      "models": [
-        {
-          "id": "glm-5.1",
-          "name": "GLM-5.1",
-          "reasoning": true,
-          "input": ["text"],
-          "contextWindow": 202752,
-          "maxTokens": 32768
-        }
-      ]
-    }
-  }
-}
-```
-
-Set defaults in `~/.pi/agent/settings.json`, preserving any existing settings
-keys:
-
-```json
-{
-  "defaultProvider": "switchboard",
-  "defaultModel": "glm-5.1"
-}
-```
-
-Verify:
-
-```bash
-pi --no-extensions --provider switchboard --model glm-5.1 --no-session --no-tools -p "Reply with exactly: switchboard ok"
-```
-
-Expected:
-
-```text
-switchboard ok
-```
-
-## Admin status
-
-`/admin/status` returns inferred key state and the active key index.
-
-`unknown` means the key is configured but has not yet been validated or used
-since startup.
-
-```bash
-curl http://127.0.0.1:8080/admin/status \
-  -H "Authorization: Bearer $PROXY_API_KEY"
-```
-
-Example response:
-
-```json
-{
-  "current_key_index": 1,
-  "keys": [
-    {
-      "index": 0,
-      "state": "exhausted",
-      "last_429_time": "2026-06-19T11:48:29Z",
-      "current": false
-    },
-    {
-      "index": 1,
-      "state": "available",
-      "current": true
-    }
-  ],
-  "note": "Remaining usage is unavailable from opencode-go API."
-}
-```
-
-Key states are inferred by this proxy:
-
-- `unknown`: key has not yet been proven available or exhausted
-- `available`: key is currently selected and not marked exhausted
-- `exhausted`: key returned a quota/usage-exhausted `429`
-
-### Validate keys
-
-`POST /admin/validate-keys` actively checks every configured upstream key against
-`/models`, updates in-memory key state, and returns per-key validation results.
-
-```bash
-curl -X POST http://127.0.0.1:8080/admin/validate-keys \
-  -H "Authorization: Bearer $PROXY_API_KEY"
-```
-
-## Usage and quota visibility
-
-OpenCode Go currently does not appear to expose a public API endpoint for
-remaining quota or usage by API key. Switchboard Go therefore cannot show exact
-remaining usage. It tracks inferred state based on upstream responses and
-reports that through `/admin/status`.
-
-If a public usage/quota endpoint becomes available, it can be added without
-changing the client-facing OpenAI-compatible API.
-
-## Readiness
-
-`/readyz` is unauthenticated. It returns JSON, verifies required config is loaded,
-and checks the currently selected non-exhausted upstream key by calling
-`/models` with a 5 second timeout.
-
-## SMTP notifications
-
-Set SMTP variables or YAML fields to receive email when the proxy switches away
-from an exhausted key and when all keys have been exhausted.
-
-Example with STARTTLS:
-
-```bash
-export SMTP_HOST="smtp.example.com"
-export SMTP_PORT="587"
-export SMTP_USERNAME="alerts@example.com"
-export SMTP_PASSWORD="your-smtp-password"
-export SMTP_FROM="alerts@example.com"
-export SMTP_TO="you@example.com"
-export SMTP_STARTTLS="true"
-```
-
-SMTP sending is asynchronous and best effort. Notification failures are logged
-but do not fail client requests.
-
-## Docker
-
-Build the image:
-
-```bash
-docker build -t switchboard-go .
-```
-
-Run with environment variables:
-
-```bash
-docker run --rm \
-  -p 8080:8080 \
-  -e LISTEN_ADDR=0.0.0.0:8080 \
-  -e PROXY_API_KEY="replace-with-a-long-random-local-key" \
-  -e OPENCODE_GO_API_KEYS="sk-first,sk-second,sk-third" \
-  switchboard-go
-```
-
-Run with a mounted YAML config:
-
-```bash
-docker run --rm \
-  -p 8080:8080 \
-  -e SWITCHBOARD_GO_CONFIG=/config/config.yaml \
-  -v "$PWD/config.yaml:/config/config.yaml:ro" \
-  switchboard-go
-```
-
-Run with non-secret settings in YAML and secrets from env overrides:
-
-```bash
-docker run --rm \
-  -p 8080:8080 \
-  -e SWITCHBOARD_GO_CONFIG=/config/config.yaml \
-  -e PROXY_API_KEY="replace-with-a-long-random-local-key" \
-  -e OPENCODE_GO_API_KEYS="sk-first,sk-second,sk-third" \
-  -v "$PWD/config.yaml:/config/config.yaml:ro" \
-  switchboard-go
-```
-
-The Docker image uses a multi-stage Go build and a distroless non-root runtime
-image.
-
-### GHCR
-
-The repo includes a workflow that publishes images to GHCR:
-
-```text
-ghcr.io/arsalandotme/switchboard-go
-```
-
-## Deployment
-
-### systemd example
-
-Create `/etc/systemd/system/switchboard-go.service`:
-
-```ini
-[Unit]
-Description=Switchboard Go OpenAI-compatible OpenCode Go key-cycling proxy
-After=network.target
-
-[Service]
-Type=simple
-Environment=SWITCHBOARD_GO_CONFIG=/etc/switchboard-go/config.yaml
-EnvironmentFile=-/etc/switchboard-go/switchboard.env
-ExecStart=/usr/local/bin/switchboard-go
-Restart=always
-RestartSec=2
-NoNewPrivileges=true
-
-[Install]
-WantedBy=multi-user.target
-```
-
-## validate-config
-
-Run a config-only check without starting the server:
-
-```bash
-switchboard-go validate-config
-```
-
-It loads config using normal precedence, validates required values, and prints a
-safe summary.
-
-Example `/etc/switchboard-go/switchboard.env`:
-
-```bash
-PROXY_API_KEY=replace-with-a-long-random-local-key
-OPENCODE_GO_API_KEYS=sk-first,sk-second,sk-third
-SMTP_PASSWORD=replace-me
-```
-
-Use restrictive permissions for config and env files containing secrets.
-
-## Security notes
-
-- Treat both `PROXY_API_KEY` and `OPENCODE_GO_API_KEYS` as secrets.
-- Use a long, random `PROXY_API_KEY`.
-- Prefer environment variables or secret managers for credentials.
-- If secrets are stored in YAML, set file permissions to `0600`.
-- Bind to `127.0.0.1` unless other machines on your LAN need access.
-- If exposing beyond a trusted LAN, put the service behind TLS and a firewall.
-- Do not commit API keys, SMTP credentials, or systemd files containing secrets.
-- `/healthz` is intentionally unauthenticated for health checks.
-- `/v1/*` and `/admin/*` require authentication.
-
-## Operational behavior
-
-- Startup logs include listen address, upstream base URL, upstream key count,
-  SMTP configured yes/no, config source path, and max request body bytes.
-- Request bodies larger than `max_request_body_bytes` are rejected with HTTP
-  `413`.
-- Hop-by-hop and proxy headers are stripped when forwarding.
-- The proxy sets a compatible default upstream `User-Agent` if the client does
-  not provide one. This avoids upstream blocks of generic HTTP clients.
-- If an upstream stream begins successfully and then later emits an error, the
-  proxy does not recover mid-stream; it only retries before a response is sent.
-- Exhausted keys remain exhausted until the process restarts.
+- [Configuration](docs/configuration.md)
+- [Agent/client setup](docs/agent-config.md)
+- [Admin API](docs/admin-api.md)
+- [Docker](docs/docker.md)
+- [systemd deployment](docs/deployment.md)
+- [SMTP notifications](docs/smtp.md)
+- [Operations and security](docs/operations.md)
 
 ## Development
 
-Run tests:
-
 ```bash
 go test ./...
-```
-
-Format code:
-
-```bash
 gofmt -w .
-```
-
-Build:
-
-```bash
 go build ./...
 ```
-
-Build Docker image:
-
-```bash
-docker build -t switchboard-go:test .
-```
-
-Create release artifacts locally with GoReleaser:
-
-```bash
-goreleaser release --snapshot --clean
-```
-
-Tagged GitHub releases are built by `.github/workflows/release.yml` and uploaded
-to the GitHub Release with SHA256 checksums.
 
 ## License
 
