@@ -490,13 +490,44 @@ func isProxyPath(path string) bool {
 }
 
 func (a *App) handleAdmin(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/admin/validate-keys" {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
+	switch {
+	case r.URL.Path == "/admin/validate-keys" && r.Method == http.MethodPost:
 		a.handleValidateKeys(w, r)
+	case r.URL.Path == "/admin/reset-key" && r.Method == http.MethodPost:
+		a.handleResetKey(w, r)
+	case r.URL.Path == "/admin/reset-all-keys" && r.Method == http.MethodPost:
+		a.handleResetAllKeys(w, r)
+	case r.URL.Path == "/admin/status" && r.Method == http.MethodGet:
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(a.keys.Status())
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+// handleResetKey un-exhausts a single upstream key by index, without restarting
+// the proxy. Body: {"index": <int>}. Responds with the updated status.
+func (a *App) handleResetKey(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Index int `json:"index"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&body); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
 		return
+	}
+	if body.Index < 0 || body.Index >= len(a.config.UpstreamAPIKeys) {
+		http.Error(w, "index out of range", http.StatusBadRequest)
+		return
+	}
+	a.keys.MarkAvailable(body.Index)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(a.keys.Status())
+}
+
+// handleResetAllKeys un-exhausts every upstream key, without restarting.
+func (a *App) handleResetAllKeys(w http.ResponseWriter, r *http.Request) {
+	for i := range a.config.UpstreamAPIKeys {
+		a.keys.MarkAvailable(i)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(a.keys.Status())
