@@ -224,6 +224,64 @@ func TestAuthOKConstantTimeCompare(t *testing.T) {
 	}
 }
 
+func TestAdminResetKeyUnExhausts(t *testing.T) {
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"a", "b"}, UpstreamBaseURL: "http://example.com", MaxRequestBodyBytes: 1})
+	app.keys.MarkExhausted(0)
+	app.keys.MarkExhausted(1)
+	body := bytes.NewReader([]byte(`{"index":0}`))
+	req := httptest.NewRequest(http.MethodPost, "/admin/reset-key", body)
+	req.Header.Set("Authorization", "Bearer p")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d body %s", rec.Code, rec.Body.String())
+	}
+	var st StatusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Keys[0].State != string(KeyAvailable) {
+		t.Fatalf("key 0 not available: %+v", st.Keys[0])
+	}
+	if st.Keys[1].State != string(KeyExhausted) {
+		t.Fatalf("key 1 should still be exhausted: %+v", st.Keys[1])
+	}
+}
+
+func TestAdminResetKeyRejectsBadIndex(t *testing.T) {
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"a"}, UpstreamBaseURL: "http://example.com", MaxRequestBodyBytes: 1})
+	body := bytes.NewReader([]byte(`{"index":99}`))
+	req := httptest.NewRequest(http.MethodPost, "/admin/reset-key", body)
+	req.Header.Set("Authorization", "Bearer p")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d", rec.Code)
+	}
+}
+
+func TestAdminResetAllKeys(t *testing.T) {
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"a", "b", "c"}, UpstreamBaseURL: "http://example.com", MaxRequestBodyBytes: 1})
+	for i := range app.config.UpstreamAPIKeys {
+		app.keys.MarkExhausted(i)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/reset-all-keys", nil)
+	req.Header.Set("Authorization", "Bearer p")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d", rec.Code)
+	}
+	var st StatusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	for i, k := range st.Keys {
+		if k.State != string(KeyAvailable) {
+			t.Fatalf("key %d not available: %+v", i, k)
+		}
+	}
+}
 func TestAuthFailureReturnsAnthropicJSON(t *testing.T) {
 	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"u"}, UpstreamBaseURL: "http://example.com", MaxRequestBodyBytes: 1})
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
