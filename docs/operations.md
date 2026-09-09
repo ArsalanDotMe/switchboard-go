@@ -70,6 +70,15 @@ disables the cooldown: exhausted keys are retried on the very next request and n
 - Hop-by-hop and proxy headers are stripped when forwarding.
 - The proxy sets a compatible default upstream `User-Agent` if the client does
   not provide one. This avoids upstream blocks of generic HTTP clients.
+- The proxy preserves a client-supplied `x-opencode-session` header. If it is
+  absent, Switchboard derives an opaque value from `X-Hermes-Session-Id`,
+  `X-Hermes-Session-Key`, or a string request-body `prompt_cache_key`,
+  `session_id`, `conversation_id`, or `user`, in that order. Hermes Responses
+  requests expose their logical conversation scope through `prompt_cache_key`.
+  If no conversation signal is available, Switchboard falls back to a stable
+  client identity derived from the client address and user agent. Raw session
+  values, client addresses, and proxy credentials are never sent upstream.
+  Clients should still send `x-opencode-session` directly when possible.
 - OpenAI-compatible requests forward the upstream key as `Authorization:
   Bearer ...`; Anthropic Messages-compatible requests forward it as
   `x-api-key`.

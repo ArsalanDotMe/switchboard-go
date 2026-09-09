@@ -25,6 +25,8 @@ OpenAI/Anthropic-compatible app -> http://127.0.0.1:8080/v1 -> OpenCode Go
 - Automatic failover when an upstream key is exhausted
 - Automatic retry of exhausted keys after a configurable cooldown, so a
   replenished account recovers without a restart or manual reset
+- OpenCode session-header preservation with Hermes conversation-signal support
+  and an opaque compatibility fallback for clients that cannot send a session ID
 - Optional YAML config, Docker, admin status, and SMTP alerts
 
 ## Install

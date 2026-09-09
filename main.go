@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,6 +61,7 @@ type APIStyle int
 const (
 	APIStyleOpenAI APIStyle = iota
 	APIStyleAnthropic
+	opencodeSessionHeader = "x-opencode-session"
 )
 
 func loadConfig() (Config, error) {
@@ -813,6 +817,7 @@ func (a *App) doUpstream(ctx context.Context, r *http.Request, body []byte, key 
 		return nil, err
 	}
 	copyHeaders(req.Header, r.Header)
+	ensureOpenCodeSessionHeader(req.Header, r, body, a.config.ProxyAPIKey)
 	if apiStyle == APIStyleAnthropic {
 		req.Header.Set("x-api-key", key)
 		if strings.TrimSpace(req.Header.Get("anthropic-version")) == "" {
@@ -829,6 +834,77 @@ func (a *App) doUpstream(ctx context.Context, r *http.Request, body []byte, key 
 	}
 	stripHopByHopHeaders(req.Header)
 	return a.client.Do(req)
+}
+
+// ensureOpenCodeSessionHeader preserves a conversation-specific value supplied
+// by the client. If that header is absent, it derives an opaque value from a
+// Hermes session header or a request-body conversation signal before falling
+// back to the client identity. The proxy key is used only as an HMAC key and is
+// never included in the resulting header.
+func ensureOpenCodeSessionHeader(headers http.Header, source *http.Request, body []byte, proxyKey string) {
+	if strings.TrimSpace(headers.Get(opencodeSessionHeader)) != "" {
+		return
+	}
+
+	identity := requestSessionIdentity(source, body)
+	mac := hmac.New(sha256.New, []byte(proxyKey))
+	_, _ = mac.Write([]byte(identity))
+	headers.Set(opencodeSessionHeader, "switchboard-"+hex.EncodeToString(mac.Sum(nil)[:16]))
+}
+
+func requestSessionIdentity(r *http.Request, body []byte) string {
+	for _, name := range []string{"X-Hermes-Session-Id", "X-Hermes-Session-Key"} {
+		if value := strings.TrimSpace(r.Header.Get(name)); value != "" {
+			return "header:" + strings.ToLower(name) + "\x00" + value
+		}
+	}
+
+	var signals struct {
+		PromptCacheKey json.RawMessage `json:"prompt_cache_key"`
+		SessionID      json.RawMessage `json:"session_id"`
+		ConversationID json.RawMessage `json:"conversation_id"`
+		User           json.RawMessage `json:"user"`
+	}
+	if len(body) > 0 && json.Unmarshal(body, &signals) == nil {
+		for _, signal := range []struct {
+			name  string
+			value json.RawMessage
+		}{
+			{"prompt_cache_key", signals.PromptCacheKey},
+			{"session_id", signals.SessionID},
+			{"conversation_id", signals.ConversationID},
+			{"user", signals.User},
+		} {
+			var value string
+			if len(signal.value) > 0 && json.Unmarshal(signal.value, &value) == nil {
+				if value = strings.TrimSpace(value); value != "" {
+					return "body:" + signal.name + "\x00" + value
+				}
+			}
+		}
+	}
+
+	return "client\x00" + fallbackSessionIdentity(r)
+}
+
+func fallbackSessionIdentity(r *http.Request) string {
+	clientAddr := ""
+	if forwardedFor := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwardedFor != "" {
+		clientAddr = strings.TrimSpace(strings.Split(forwardedFor, ",")[0])
+	}
+	if clientAddr == "" {
+		clientAddr = strings.TrimSpace(r.Header.Get("X-Real-IP"))
+	}
+	if clientAddr == "" {
+		clientAddr = strings.TrimSpace(r.RemoteAddr)
+		if host, _, err := net.SplitHostPort(clientAddr); err == nil {
+			clientAddr = host
+		}
+	}
+	if clientAddr == "" {
+		clientAddr = "unknown-client"
+	}
+	return clientAddr + "\x00" + strings.TrimSpace(r.UserAgent())
 }
 
 func apiStyleForRequest(r *http.Request) APIStyle {

@@ -123,6 +123,133 @@ func TestDoUpstreamSetsDefaultUserAgent(t *testing.T) {
 	}
 }
 
+func TestDoUpstreamUsesHermesConversationHeader(t *testing.T) {
+	var sessions []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessions = append(sessions, r.Header.Get(opencodeSessionHeader))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	app := newApp(Config{ProxyAPIKey: "proxy-secret", UpstreamAPIKeys: []string{"u"}, UpstreamBaseURL: upstream.URL})
+	for _, clientAddr := range []string{"100.75.145.77", "100.93.175.33"} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		req.Header.Set("X-Forwarded-For", clientAddr)
+		req.Header.Set("X-Hermes-Session-Id", "hermes-conversation-123")
+		resp, err := app.doUpstream(req.Context(), req, nil, "u", APIStyleOpenAI)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	if len(sessions) != 2 || sessions[0] == "" || sessions[0] != sessions[1] {
+		t.Fatalf("expected Hermes conversation header to win over client identity, got %#v", sessions)
+	}
+	if strings.Contains(sessions[0], "hermes-conversation-123") {
+		t.Fatalf("Hermes conversation id was not made opaque: %q", sessions[0])
+	}
+}
+
+func TestDoUpstreamUsesPromptCacheKeyConversationSignal(t *testing.T) {
+	var sessions []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessions = append(sessions, r.Header.Get(opencodeSessionHeader))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	app := newApp(Config{ProxyAPIKey: "proxy-secret", UpstreamAPIKeys: []string{"u"}, UpstreamBaseURL: upstream.URL})
+	body := []byte(`{"model":"deepseek-v4-flash","prompt_cache_key":"pck-hermes-logical-session","input":[]}`)
+	for _, clientAddr := range []string{"100.75.145.77", "100.93.175.33"} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+		req.Header.Set("X-Forwarded-For", clientAddr)
+		resp, err := app.doUpstream(req.Context(), req, body, "u", APIStyleOpenAI)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	if len(sessions) != 2 || sessions[0] == "" || sessions[0] != sessions[1] {
+		t.Fatalf("expected prompt cache key to win over client identity, got %#v", sessions)
+	}
+	if strings.Contains(sessions[0], "pck-hermes-logical-session") {
+		t.Fatalf("prompt cache key was not made opaque: %q", sessions[0])
+	}
+}
+
+func TestDoUpstreamPreservesOpenCodeSessionHeader(t *testing.T) {
+	var gotSession string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSession = r.Header.Get(opencodeSessionHeader)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	app := newApp(Config{ProxyAPIKey: "proxy-secret", UpstreamAPIKeys: []string{"u"}, UpstreamBaseURL: upstream.URL})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set(opencodeSessionHeader, "conversation-123")
+	resp, err := app.doUpstream(req.Context(), req, nil, "u", APIStyleOpenAI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if gotSession != "conversation-123" {
+		t.Fatalf("got session header %q", gotSession)
+	}
+}
+
+func TestDoUpstreamAddsStableOpaqueSessionFallback(t *testing.T) {
+	var sessions []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessions = append(sessions, r.Header.Get(opencodeSessionHeader))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	app := newApp(Config{ProxyAPIKey: "proxy-secret", UpstreamAPIKeys: []string{"u"}, UpstreamBaseURL: upstream.URL})
+	for _, remoteAddr := range []string{"127.0.0.1:41001", "127.0.0.1:51002"} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		req.RemoteAddr = remoteAddr
+		req.Header.Set("X-Forwarded-For", "100.75.145.77")
+		req.Header.Set("User-Agent", "Hermes/0.21.1")
+		resp, err := app.doUpstream(req.Context(), req, nil, "u", APIStyleOpenAI)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	if len(sessions) != 2 || sessions[0] == "" || sessions[0] != sessions[1] {
+		t.Fatalf("expected one stable non-empty fallback, got %#v", sessions)
+	}
+	if !strings.HasPrefix(sessions[0], "switchboard-") || strings.Contains(sessions[0], "proxy-secret") || strings.Contains(sessions[0], "100.75.145.77") {
+		t.Fatalf("fallback is not opaque: %q", sessions[0])
+	}
+}
+
+func TestDoUpstreamSessionFallbackSeparatesClients(t *testing.T) {
+	var sessions []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessions = append(sessions, r.Header.Get(opencodeSessionHeader))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	app := newApp(Config{ProxyAPIKey: "proxy-secret", UpstreamAPIKeys: []string{"u"}, UpstreamBaseURL: upstream.URL})
+	for _, clientAddr := range []string{"100.75.145.77", "100.93.175.33"} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		req.Header.Set("X-Forwarded-For", clientAddr)
+		req.Header.Set("User-Agent", "Hermes/0.21.1")
+		resp, err := app.doUpstream(req.Context(), req, nil, "u", APIStyleAnthropic)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	if len(sessions) != 2 || sessions[0] == "" || sessions[0] == sessions[1] {
+		t.Fatalf("expected distinct client fallbacks, got %#v", sessions)
+	}
+}
+
 func TestDoUpstreamAnthropicSetsHeaders(t *testing.T) {
 	var gotPath, gotKey, gotAuth, gotVersion, gotUA string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
