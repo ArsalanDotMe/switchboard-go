@@ -37,7 +37,12 @@ type Config struct {
 	// exhausted keys are retried on the very next request (client backoff is the
 	// only pacing).
 	RetryExhaustedAfter time.Duration
-	ConfigSourcePath    string
+	// UpstreamResponseHeaderTimeout is how long the upstream HTTP client waits
+	// for a response's headers. LLM upstreams can spend a long time before the
+	// first body bytes (thinking/pre-processing for non-streaming completions),
+	// so the default may need raising. Zero disables the timeout entirely.
+	UpstreamResponseHeaderTimeout time.Duration
+	ConfigSourcePath              string
 
 	SMTP SMTPConfig
 }
@@ -77,7 +82,7 @@ func loadConfig() (Config, error) {
 }
 
 func defaultConfig() Config {
-	return Config{ListenAddr: ":8080", UpstreamBaseURL: "https://opencode.ai/zen/go/v1", MaxRequestBodyBytes: 20 << 20, RetryExhaustedAfter: 5 * time.Minute, SMTP: SMTPConfig{Port: 25}}
+	return Config{ListenAddr: ":8080", UpstreamBaseURL: "https://opencode.ai/zen/go/v1", MaxRequestBodyBytes: 20 << 20, RetryExhaustedAfter: 5 * time.Minute, UpstreamResponseHeaderTimeout: 30 * time.Second, SMTP: SMTPConfig{Port: 25}}
 }
 
 func resolveConfigPath() (string, bool, error) {
@@ -107,9 +112,10 @@ type yamlConfig struct {
 		ProxyAPIKey string `yaml:"proxy_api_key"`
 	} `yaml:"server"`
 	Upstream struct {
-		BaseURL             string   `yaml:"base_url"`
-		APIKeys             []string `yaml:"api_keys"`
-		RetryExhaustedAfter string   `yaml:"retry_exhausted_after"`
+		BaseURL               string   `yaml:"base_url"`
+		APIKeys               []string `yaml:"api_keys"`
+		RetryExhaustedAfter   string   `yaml:"retry_exhausted_after"`
+		ResponseHeaderTimeout string   `yaml:"response_header_timeout"`
 	} `yaml:"upstream"`
 	SMTP struct {
 		Host     string `yaml:"host"`
@@ -148,7 +154,18 @@ func loadYAMLConfig(path string) (Config, error) {
 		}
 		retry = d
 	}
-	return Config{ListenAddr: yc.Server.ListenAddr, UpstreamBaseURL: yc.Upstream.BaseURL, ProxyAPIKey: yc.Server.ProxyAPIKey, UpstreamAPIKeys: yc.Upstream.APIKeys, MaxRequestBodyBytes: yc.Limits.MaxRequestBodyBytes, RetryExhaustedAfter: retry, SMTP: SMTPConfig{Host: yc.SMTP.Host, Port: yc.SMTP.Port, Username: yc.SMTP.Username, Password: yc.SMTP.Password, From: yc.SMTP.From, To: yc.SMTP.To, TLS: yc.SMTP.TLS, StartTLS: yc.SMTP.StartTLS}}, nil
+	headerTimeout := time.Duration(-1)
+	if s := strings.TrimSpace(yc.Upstream.ResponseHeaderTimeout); s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse response_header_timeout: %w", err)
+		}
+		if d < 0 {
+			return Config{}, fmt.Errorf("response_header_timeout must be >= 0")
+		}
+		headerTimeout = d
+	}
+	return Config{ListenAddr: yc.Server.ListenAddr, UpstreamBaseURL: yc.Upstream.BaseURL, ProxyAPIKey: yc.Server.ProxyAPIKey, UpstreamAPIKeys: yc.Upstream.APIKeys, MaxRequestBodyBytes: yc.Limits.MaxRequestBodyBytes, RetryExhaustedAfter: retry, UpstreamResponseHeaderTimeout: headerTimeout, SMTP: SMTPConfig{Host: yc.SMTP.Host, Port: yc.SMTP.Port, Username: yc.SMTP.Username, Password: yc.SMTP.Password, From: yc.SMTP.From, To: yc.SMTP.To, TLS: yc.SMTP.TLS, StartTLS: yc.SMTP.StartTLS}}, nil
 }
 
 func mergeConfig(dst *Config, src Config) {
@@ -169,6 +186,9 @@ func mergeConfig(dst *Config, src Config) {
 	}
 	if src.RetryExhaustedAfter >= 0 {
 		dst.RetryExhaustedAfter = src.RetryExhaustedAfter
+	}
+	if src.UpstreamResponseHeaderTimeout >= 0 {
+		dst.UpstreamResponseHeaderTimeout = src.UpstreamResponseHeaderTimeout
 	}
 	if src.SMTP.Host != "" {
 		dst.SMTP.Host = src.SMTP.Host
@@ -227,6 +247,15 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.RetryExhaustedAfter = -1
 		}
 	}
+	if v := strings.TrimSpace(os.Getenv("UPSTREAM_RESPONSE_HEADER_TIMEOUT")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			cfg.UpstreamResponseHeaderTimeout = d
+		} else {
+			// Preserve an invalid sentinel so validateConfig reports the typo
+			// instead of silently retaining a different YAML/default value.
+			cfg.UpstreamResponseHeaderTimeout = -1
+		}
+	}
 	if v := os.Getenv("SMTP_HOST"); v != "" {
 		cfg.SMTP.Host = v
 	}
@@ -278,11 +307,14 @@ func validateConfig(cfg Config) error {
 	if cfg.RetryExhaustedAfter < 0 {
 		return errors.New("RETRY_EXHAUSTED_AFTER must be >= 0")
 	}
+	if cfg.UpstreamResponseHeaderTimeout < 0 {
+		return errors.New("UPSTREAM_RESPONSE_HEADER_TIMEOUT must be >= 0")
+	}
 	return nil
 }
 
 func safeConfigSummary(cfg Config) string {
-	return fmt.Sprintf("listen=%s upstream=%s upstream_keys=%d smtp_configured=%t config_source=%s max_request_body_bytes=%d retry_exhausted_after=%s", cfg.ListenAddr, cfg.UpstreamBaseURL, len(cfg.UpstreamAPIKeys), cfg.SMTP.Host != "" && cfg.SMTP.From != "" && cfg.SMTP.To != "", defaultString(cfg.ConfigSourcePath, "none"), cfg.MaxRequestBodyBytes, cfg.RetryExhaustedAfter)
+	return fmt.Sprintf("listen=%s upstream=%s upstream_keys=%d smtp_configured=%t config_source=%s max_request_body_bytes=%d retry_exhausted_after=%s response_header_timeout=%s", cfg.ListenAddr, cfg.UpstreamBaseURL, len(cfg.UpstreamAPIKeys), cfg.SMTP.Host != "" && cfg.SMTP.From != "" && cfg.SMTP.To != "", defaultString(cfg.ConfigSourcePath, "none"), cfg.MaxRequestBodyBytes, cfg.RetryExhaustedAfter, cfg.UpstreamResponseHeaderTimeout)
 }
 
 func parseBool(v string) bool { b, _ := strconv.ParseBool(strings.TrimSpace(v)); return b }
@@ -553,7 +585,7 @@ type App struct {
 }
 
 func newApp(cfg Config) *App {
-	return &App{config: cfg, keys: NewKeyManager(cfg.UpstreamAPIKeys, cfg.RetryExhaustedAfter), client: &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 30 * time.Second, ExpectContinueTimeout: 2 * time.Second}}, sender: NewSMTPNotifier(cfg.SMTP)}
+	return &App{config: cfg, keys: NewKeyManager(cfg.UpstreamAPIKeys, cfg.RetryExhaustedAfter), client: &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: cfg.UpstreamResponseHeaderTimeout, ExpectContinueTimeout: 2 * time.Second}}, sender: NewSMTPNotifier(cfg.SMTP)}
 }
 
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -1047,7 +1079,7 @@ func main() {
 		defer cancel()
 		_ = srv.Shutdown(shut)
 	}()
-	log.Printf("startup listen_addr=%s upstream_base_url=%s upstream_keys=%d smtp_configured=%t config_source=%s max_request_body_bytes=%d retry_exhausted_after=%s", cfg.ListenAddr, cfg.UpstreamBaseURL, len(cfg.UpstreamAPIKeys), cfg.SMTP.Host != "" && cfg.SMTP.From != "" && cfg.SMTP.To != "", defaultString(cfg.ConfigSourcePath, "none"), cfg.MaxRequestBodyBytes, cfg.RetryExhaustedAfter)
+	log.Printf("startup listen_addr=%s upstream_base_url=%s upstream_keys=%d smtp_configured=%t config_source=%s max_request_body_bytes=%d retry_exhausted_after=%s response_header_timeout=%s", cfg.ListenAddr, cfg.UpstreamBaseURL, len(cfg.UpstreamAPIKeys), cfg.SMTP.Host != "" && cfg.SMTP.From != "" && cfg.SMTP.To != "", defaultString(cfg.ConfigSourcePath, "none"), cfg.MaxRequestBodyBytes, cfg.RetryExhaustedAfter, cfg.UpstreamResponseHeaderTimeout)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}

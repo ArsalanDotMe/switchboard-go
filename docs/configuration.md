@@ -56,6 +56,10 @@ upstream:
   # Accepts a Go duration ("30s", "5m", "1h"). "0" disables the cooldown so
   # exhausted keys are retried on the very next request.
   retry_exhausted_after: "5m"
+  # Max wait for response headers from the upstream API. LLM completions can
+  # spend a long time before sending their first body bytes, so slow
+  # non-streaming requests may need this raised. "0" disables the timeout.
+  response_header_timeout: "30s"
 
 smtp:
   host: "smtp.example.com"
@@ -82,6 +86,7 @@ limits:
 | `UPSTREAM_BASE_URL` | No | `https://opencode.ai/zen/go/v1` | OpenCode Go upstream base URL for OpenAI-compatible and Anthropic Messages-compatible routes. |
 | `MAX_REQUEST_BODY_BYTES` | No | `20971520` | Maximum request body size. Requests above this return `413`. |
 | `RETRY_EXHAUSTED_AFTER` | No | `5m` | Cooldown before an exhausted key is retried automatically. Go duration (`30s`, `5m`). `0` disables the cooldown (retry on the next request). Maps to `upstream.retry_exhausted_after`. |
+| `UPSTREAM_RESPONSE_HEADER_TIMEOUT` | No | `30s` | Max wait for response headers from the upstream API. Go duration (`30s`, `5m`). `0` disables it. Maps to `upstream.response_header_timeout`. |
 | `SMTP_HOST` | No | | SMTP host for notifications. |
 | `SMTP_PORT` | No | `25` | SMTP port. |
 | `SMTP_USERNAME` | No | | SMTP username. If empty, SMTP AUTH is skipped. |
