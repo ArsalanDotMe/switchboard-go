@@ -673,3 +673,92 @@ func TestLoadConfigRejectsInvalidRetryExhaustedAfterEnv(t *testing.T) {
 		t.Fatalf("expected RETRY_EXHAUSTED_AFTER validation error, got %v", err)
 	}
 }
+
+type flushRecorder struct {
+	*httptest.ResponseRecorder
+	flushCount int
+}
+
+func (f *flushRecorder) Flush() {
+	f.flushCount++
+	f.ResponseRecorder.Flush()
+}
+
+type chunkedReader struct {
+	chunks [][]byte
+	idx    int
+}
+
+func (cr *chunkedReader) Read(p []byte) (n int, err error) {
+	if cr.idx >= len(cr.chunks) {
+		return 0, io.EOF
+	}
+	n = copy(p, cr.chunks[cr.idx])
+	cr.idx++
+	return n, nil
+}
+
+func TestCopyResponseFlushesEventStream(t *testing.T) {
+	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"text/event-stream; charset=utf-8"},
+		},
+		Body: io.NopCloser(&chunkedReader{
+			chunks: [][]byte{
+				[]byte("data: {\"choices\": [{\"delta\": {\"content\": \"Hello\"}}]}\n\n"),
+				[]byte("data: {\"choices\": [{\"delta\": {\"content\": \" World\"}}]}\n\n"),
+				[]byte("data: [DONE]\n\n"),
+			},
+		}),
+	}
+
+	copyResponse(rec, resp)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	if rec.flushCount != 3 {
+		t.Fatalf("expected exactly 3 flushes, got %d", rec.flushCount)
+	}
+
+	expectedBody := "data: {\"choices\": [{\"delta\": {\"content\": \"Hello\"}}]}\n\ndata: {\"choices\": [{\"delta\": {\"content\": \" World\"}}]}\n\ndata: [DONE]\n\n"
+	if rec.Body.String() != expectedBody {
+		t.Fatalf("unexpected body: got %q", rec.Body.String())
+	}
+}
+
+func TestCopyResponseDoesNotFlushNormalJSON(t *testing.T) {
+	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"application/json"},
+		},
+		Body: io.NopCloser(&chunkedReader{
+			chunks: [][]byte{
+				[]byte(`{"choices": `),
+				[]byte(`[{"message": {"content": "Hello World"}}]}`),
+			},
+		}),
+	}
+
+	copyResponse(rec, resp)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	if rec.flushCount != 0 {
+		t.Fatalf("expected 0 explicit flushes for non-stream JSON, got %d", rec.flushCount)
+	}
+
+	expectedBody := `{"choices": [{"message": {"content": "Hello World"}}]}`
+	if rec.Body.String() != expectedBody {
+		t.Fatalf("unexpected body: got %q", rec.Body.String())
+	}
+}
