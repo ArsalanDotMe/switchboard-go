@@ -95,6 +95,37 @@ curl http://127.0.0.1:8080/v1/messages \
 For opencode and Pi Coding Agent examples, see
 [docs/agent-config.md](docs/agent-config.md).
 
+## Use it with Hermes Agent
+
+Hermes Agent has a built-in `opencode-go` provider for OpenCode Go. Use that
+provider with Switchboard Go so Hermes sends the session information OpenCode Go
+needs. A generic `openai-api` provider may not send it.
+
+Set the provider, your Switchboard Go URL, a model supported by your OpenCode Go
+account, and the environment variable that will hold your Switchboard proxy
+key:
+
+```bash
+hermes config set model.provider opencode-go
+hermes config set model.base_url "https://switchboard.example.com/v1"
+hermes config set model.default "<model-id>"
+hermes config set model.key_env OPENAI_API_KEY
+```
+
+Replace the example URL with the address of your Switchboard Go instance. Set
+`OPENAI_API_KEY` in the environment used to start Hermes, and give it your
+Switchboard `PROXY_API_KEY` value. Do not use an upstream OpenCode Go key here.
+If Hermes runs as a background gateway, make sure the gateway service can read
+that environment variable.
+
+Restart the Hermes gateway after changing its settings, then send a small test
+prompt:
+
+```bash
+hermes gateway restart
+hermes chat -q "Reply with exactly: switchboard ok" --oneshot
+```
+
 ## Common settings
 
 | Variable | Required | Default | Description |
