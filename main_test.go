@@ -673,3 +673,160 @@ func TestLoadConfigRejectsInvalidRetryExhaustedAfterEnv(t *testing.T) {
 		t.Fatalf("expected RETRY_EXHAUSTED_AFTER validation error, got %v", err)
 	}
 }
+
+func TestLoadConfigResponseHeaderTimeoutParsedAndOverridden(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := []byte("server: {proxy_api_key: \"p\"}\nupstream: {base_url: \"https://x\", api_keys: [\"k\"], response_header_timeout: \"90s\"}\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SWITCHBOARD_GO_CONFIG", path)
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UpstreamResponseHeaderTimeout != 90*time.Second {
+		t.Fatalf("expected 90s from yaml, got %s", cfg.UpstreamResponseHeaderTimeout)
+	}
+	t.Setenv("UPSTREAM_RESPONSE_HEADER_TIMEOUT", "5m")
+	cfg, err = loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UpstreamResponseHeaderTimeout != 5*time.Minute {
+		t.Fatalf("expected env override to 5m, got %s", cfg.UpstreamResponseHeaderTimeout)
+	}
+}
+
+func TestLoadConfigResponseHeaderTimeoutDefaultAndExplicitZero(t *testing.T) {
+	dir := t.TempDir()
+	omitted := filepath.Join(dir, "omitted.yaml")
+	if err := os.WriteFile(omitted, []byte("server: {proxy_api_key: \"p\"}\nupstream: {base_url: \"https://x\", api_keys: [\"k\"]}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SWITCHBOARD_GO_CONFIG", omitted)
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UpstreamResponseHeaderTimeout != 30*time.Second {
+		t.Fatalf("expected default 30s when omitted, got %s", cfg.UpstreamResponseHeaderTimeout)
+	}
+
+	zero := filepath.Join(dir, "zero.yaml")
+	if err := os.WriteFile(zero, []byte("server: {proxy_api_key: \"p\"}\nupstream: {base_url: \"https://x\", api_keys: [\"k\"], response_header_timeout: \"0\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SWITCHBOARD_GO_CONFIG", zero)
+	cfg, err = loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UpstreamResponseHeaderTimeout != 0 {
+		t.Fatalf("expected explicit 0 to disable header timeout, got %s", cfg.UpstreamResponseHeaderTimeout)
+	}
+}
+
+func TestLoadConfigRejectsInvalidResponseHeaderTimeoutEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := []byte("server: {proxy_api_key: \"p\"}\nupstream: {base_url: \"https://x\", api_keys: [\"k\"]}\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SWITCHBOARD_GO_CONFIG", path)
+	t.Setenv("UPSTREAM_RESPONSE_HEADER_TIMEOUT", "not-a-duration")
+	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "UPSTREAM_RESPONSE_HEADER_TIMEOUT") {
+		t.Fatalf("expected UPSTREAM_RESPONSE_HEADER_TIMEOUT validation error, got %v", err)
+	}
+}
+
+type flushRecorder struct {
+	*httptest.ResponseRecorder
+	flushCount int
+}
+
+func (f *flushRecorder) Flush() {
+	f.flushCount++
+	f.ResponseRecorder.Flush()
+}
+
+type chunkedReader struct {
+	chunks [][]byte
+	idx    int
+}
+
+func (cr *chunkedReader) Read(p []byte) (n int, err error) {
+	if cr.idx >= len(cr.chunks) {
+		return 0, io.EOF
+	}
+	n = copy(p, cr.chunks[cr.idx])
+	cr.idx++
+	return n, nil
+}
+
+func TestCopyResponseFlushesEventStream(t *testing.T) {
+	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"text/event-stream; charset=utf-8"},
+		},
+		Body: io.NopCloser(&chunkedReader{
+			chunks: [][]byte{
+				[]byte("data: {\"choices\": [{\"delta\": {\"content\": \"Hello\"}}]}\n\n"),
+				[]byte("data: {\"choices\": [{\"delta\": {\"content\": \" World\"}}]}\n\n"),
+				[]byte("data: [DONE]\n\n"),
+			},
+		}),
+	}
+
+	copyResponse(rec, resp)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	if rec.flushCount != 3 {
+		t.Fatalf("expected exactly 3 flushes, got %d", rec.flushCount)
+	}
+
+	expectedBody := "data: {\"choices\": [{\"delta\": {\"content\": \"Hello\"}}]}\n\ndata: {\"choices\": [{\"delta\": {\"content\": \" World\"}}]}\n\ndata: [DONE]\n\n"
+	if rec.Body.String() != expectedBody {
+		t.Fatalf("unexpected body: got %q", rec.Body.String())
+	}
+}
+
+func TestCopyResponseDoesNotFlushNormalJSON(t *testing.T) {
+	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"application/json"},
+		},
+		Body: io.NopCloser(&chunkedReader{
+			chunks: [][]byte{
+				[]byte(`{"choices": `),
+				[]byte(`[{"message": {"content": "Hello World"}}]}`),
+			},
+		}),
+	}
+
+	copyResponse(rec, resp)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	if rec.flushCount != 0 {
+		t.Fatalf("expected 0 explicit flushes for non-stream JSON, got %d", rec.flushCount)
+	}
+
+	expectedBody := `{"choices": [{"message": {"content": "Hello World"}}]}`
+	if rec.Body.String() != expectedBody {
+		t.Fatalf("unexpected body: got %q", rec.Body.String())
+	}
+}
