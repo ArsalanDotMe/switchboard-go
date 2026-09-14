@@ -104,6 +104,7 @@ For opencode and Pi Coding Agent examples, see
 | `LISTEN_ADDR` | No | `:8080` | Use `127.0.0.1:8080` for local-only access. |
 | `UPSTREAM_BASE_URL` | No | `https://opencode.ai/zen/go/v1` | OpenCode Go upstream base URL. |
 | `RETRY_EXHAUSTED_AFTER` | No | `5m` | Cooldown before an exhausted key is retried automatically. `0` disables it. |
+| `UPSTREAM_RESPONSE_HEADER_TIMEOUT` | No | `30s` | Max wait for response headers from the upstream API. Raise this if slow LLM requests fail with a header-timeout error. `0` disables it. |
 
 YAML config is also supported. See
 [docs/configuration.md](docs/configuration.md).
