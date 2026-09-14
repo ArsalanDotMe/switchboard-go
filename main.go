@@ -918,7 +918,25 @@ func copyResponse(w http.ResponseWriter, resp *http.Response) {
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+
+	flusher, canFlush := w.(http.Flusher)
+	isStream := strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream")
+
+	if canFlush && isStream {
+		buf := make([]byte, 4096)
+		for {
+			n, err := resp.Body.Read(buf)
+			if n > 0 {
+				_, _ = w.Write(buf[:n])
+				flusher.Flush()
+			}
+			if err != nil {
+				break
+			}
+		}
+	} else {
+		_, _ = io.Copy(w, resp.Body)
+	}
 }
 
 func isQuota429(resp *http.Response) bool {
