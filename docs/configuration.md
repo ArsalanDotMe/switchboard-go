@@ -84,6 +84,9 @@ limits:
 | `OPENCODE_GO_API_KEYS` | Yes\* | | Comma-separated OpenCode Go API keys. |
 | `LISTEN_ADDR` | No | `:8080` | HTTP listen address. Use `127.0.0.1:8080` for local-only access. |
 | `UPSTREAM_BASE_URL` | No | `https://opencode.ai/zen/go/v1` | OpenCode Go upstream base URL for OpenAI-compatible and Anthropic Messages-compatible routes. |
+| `OPENCODE_GO_KEY_NAMES` | No | | Comma-separated labels for the keys, in the same order as `OPENCODE_GO_API_KEYS`. Shown by `/admin/keys` so a key is identified by name and index, never by value. Missing or shorter list means empty names. Max 40 characters each; line breaks are removed. |
+| `USAGE_URL` | No | `https://opencode.ai/zen/go/v1/usage` | OpenCode Go usage endpoint queried by `/admin/keys` (override for tests). |
+| `USAGE_CACHE_TTL` | No | `60s` | How long `/admin/keys` reuses each key's usage lookup, so a refreshing dashboard does not hammer the upstream. Go duration. `0` disables the cache. |
 | `MAX_REQUEST_BODY_BYTES` | No | `20971520` | Maximum request body size. Requests above this return `413`. |
 | `RETRY_EXHAUSTED_AFTER` | No | `5m` | Cooldown before an exhausted key is retried automatically. Go duration (`30s`, `5m`). `0` disables the cooldown (retry on the next request). Maps to `upstream.retry_exhausted_after`. |
 | `UPSTREAM_RESPONSE_HEADER_TIMEOUT` | No | `30s` | Max wait for response headers from the upstream API. Go duration (`30s`, `5m`). `0` disables it. Maps to `upstream.response_header_timeout`. |
@@ -117,5 +120,6 @@ Example env file for systemd:
 ```bash
 PROXY_API_KEY=replace-with-a-long-random-local-key
 OPENCODE_GO_API_KEYS=sk-first,sk-second,sk-third
+OPENCODE_GO_KEY_NAMES=main,spare,team
 SMTP_PASSWORD=replace-me
 ```

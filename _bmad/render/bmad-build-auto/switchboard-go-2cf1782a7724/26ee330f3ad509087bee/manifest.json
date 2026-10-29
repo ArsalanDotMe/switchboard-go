@@ -1,0 +1,57 @@
+{
+  "generation_hash": "26ee330f3ad509087bee",
+  "inputs": {
+    "jinja2_version": "3.1.6",
+    "project_root": "/Users/eduardomenoncello/Documents/projects/switchboard-go",
+    "renderer_sha256": "82b4d567c335a596d086d94b4772d0a4a9e09065f84b45c3647276593d02552c",
+    "resolved_values": {
+      "config.core.output_folder": "/Users/eduardomenoncello/Documents/projects/switchboard-go/_bmad-output",
+      "customization.workflow.activation_steps_append": [],
+      "customization.workflow.activation_steps_prepend": [],
+      "customization.workflow.implementation_handoff": "Launch a subagent with no prior conversation context, with this prompt:\n\n> Read {plan_file} fully and implement it — the plan is the sole source of truth. Load every file listed in its frontmatter `context:` before you start.\n>\n> When done, report what you changed, how you verified it, and anything left incomplete or risky.\n",
+      "customization.workflow.on_complete": "",
+      "customization.workflow.persistent_facts": [],
+      "customization.workflow.quick_lenses": [
+        {
+          "id": "quick",
+          "instruction": "Launch a context-free subagent with this prompt:\n\nRead `{plan_file}` — the plan holding the acceptance criteria and intent — and the files its frontmatter `context:` lists. Read the agent instruction files (`AGENTS.md`, `CLAUDE.md`, or equivalents) at the repository root and in the directories the diff touches; those are the rules. Then read the unified diff at `{diff_file}` — it is the change under review.\n\nReport unmet acceptance criteria, broken rules, and bugs. Each finding: the location, what goes wrong, and evidence checked against the surrounding code. Output a Markdown list of findings only — no severity, priority, or ranking.\n\nReview by inspection only. Do not modify code, run builds or tests, or invoke quality gates. Do not invoke any skill, and do not spawn subagents of your own — you are the reviewer. Return your findings as text in your final message; do not route them through any findings-reporting tool the host may offer.\n\n",
+          "name": "Quick"
+        }
+      ],
+      "customization.workflow.review": "quick",
+      "customization.workflow.route": "auto",
+      "customization.workflow.route_selection": "Decide whether to use a coding subagent (full) or implement directly (oneshot).\nUsing the information already gathered, with no further reading and minimal\nextra reasoning, estimate the lines of code to add or modify.\n100 lines or fewer: oneshot. Otherwise: full.\nIf the change touches more than five files and is not simple or mechanical,\nconsider upgrading to full.\n",
+      "initiative_folder": "/Users/eduardomenoncello/Documents/projects/switchboard-go/_bmad-output/initiative-multi-provider"
+    },
+    "skill_root": "/Users/eduardomenoncello/Documents/projects/switchboard-go/.agents/skills/bmad-build-auto",
+    "source_sha256": {
+      "plan-template.md": "8c9835aaedfc429b7492a8ed0ad27ca5f2301df72598700d0e7efb8c4dcabc7b",
+      "references/claims-check.md": "6cb20a86d819b95272876bca0dffef59ca07ba6a373d804295066751043867c0",
+      "references/deletion-check.md": "0f1f124e4e957147e89164a272b10bedc694ad0d9ad2618c8610ac74ee9cb0da",
+      "review-prompts/edge-case-hunter.md": "b909fe0ec8e4daaf2550d0ec783618c5146261d0dbc0e054698ce00d0905a3d1",
+      "review-prompts/verification-gap.md": "859930110817293bf9d25bd6df093f094cdc50fe6b8359e3720aee6dba96e17a",
+      "step-01-clarify-and-route.md": "61b70fd9cd33974444e277c6bf021e95bd2095f539916dca9b31fa32e50f117a",
+      "step-02-plan.md": "f8c43030c7706517ea96faf5aa5a38c56a770a12ef2e3c7f37228a3d3725ca84",
+      "step-03-implement.md": "bbe36d05e0ad30e1398c4ece55705f0eb74fdd7feccf68415c45d29435a45089",
+      "step-04-review.md": "81690643d0ce072ffe870fbdd83cee1f7aea3f2383fb4b5dd4e331ab9f376131",
+      "workflow.md": "02be104dccfd1f3c3cfa5563369578665b97b3a5c129e512b62374872dd74b91"
+    }
+  },
+  "outputs": {
+    "plan-template.md": "8c9835aaedfc429b7492a8ed0ad27ca5f2301df72598700d0e7efb8c4dcabc7b",
+    "references/claims-check.md": "6cb20a86d819b95272876bca0dffef59ca07ba6a373d804295066751043867c0",
+    "references/deletion-check.md": "0f1f124e4e957147e89164a272b10bedc694ad0d9ad2618c8610ac74ee9cb0da",
+    "review-prompts/edge-case-hunter.md": "b909fe0ec8e4daaf2550d0ec783618c5146261d0dbc0e054698ce00d0905a3d1",
+    "review-prompts/verification-gap.md": "859930110817293bf9d25bd6df093f094cdc50fe6b8359e3720aee6dba96e17a",
+    "step-01-clarify-and-route.md": "fd75b0e29d15f999f2cbaf7279a19ab1ff97b2aea4b01ab1d349e71bc1a6bc36",
+    "step-02-plan.md": "2506f89c886c2ae07bc44bfd9bc577419fc808e90c17ebcc10f0f8bbfce13a55",
+    "step-03-implement.md": "31d5affd68e57aa70e6db8d9d4d3ab5d5c73871455eff991a618cbc3bdf734a1",
+    "step-04-review.md": "079dc686a9e885555968dd7df4ce5baa64f71f53b9eba1b2d02f7c3a194b3ac2",
+    "workflow.md": "99a9918d0ac8208ba8ced024d5bcbed3ab48efa2b5cb4b544e074a94c606278d"
+  },
+  "project_root": "/Users/eduardomenoncello/Documents/projects/switchboard-go",
+  "project_slug": "switchboard-go",
+  "root_hash": "2cf1782a7724",
+  "schema_version": 1,
+  "skill": "bmad-build-auto"
+}

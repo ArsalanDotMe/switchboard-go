@@ -44,6 +44,14 @@ type Config struct {
 	UpstreamResponseHeaderTimeout time.Duration
 	ConfigSourcePath              string
 
+	// KeyNames labels UpstreamAPIKeys by position (OPENCODE_GO_KEY_NAMES); the
+	// key value itself is never shown. Missing entries mean an empty name.
+	KeyNames []string
+	// UsageURL is the OpenCode Go usage endpoint queried by /admin/keys and /status.
+	UsageURL string
+	// UsageCacheTTL is how long /admin/keys and /status reuse a usage lookup per key.
+	UsageCacheTTL time.Duration
+
 	SMTP SMTPConfig
 }
 
@@ -82,7 +90,7 @@ func loadConfig() (Config, error) {
 }
 
 func defaultConfig() Config {
-	return Config{ListenAddr: ":8080", UpstreamBaseURL: "https://opencode.ai/zen/go/v1", MaxRequestBodyBytes: 20 << 20, RetryExhaustedAfter: 5 * time.Minute, UpstreamResponseHeaderTimeout: 30 * time.Second, SMTP: SMTPConfig{Port: 25}}
+	return Config{ListenAddr: ":8080", UpstreamBaseURL: "https://opencode.ai/zen/go/v1", MaxRequestBodyBytes: 20 << 20, RetryExhaustedAfter: 5 * time.Minute, UpstreamResponseHeaderTimeout: 30 * time.Second, UsageURL: defaultUsageURL, UsageCacheTTL: defaultUsageCacheTTL, SMTP: SMTPConfig{Port: 25}}
 }
 
 func resolveConfigPath() (string, bool, error) {
@@ -256,6 +264,19 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.UpstreamResponseHeaderTimeout = -1
 		}
 	}
+	if v := os.Getenv("OPENCODE_GO_KEY_NAMES"); v != "" {
+		cfg.KeyNames = parseKeyNames(v)
+	}
+	if v := strings.TrimSpace(os.Getenv("USAGE_URL")); v != "" {
+		cfg.UsageURL = v
+	}
+	if v := strings.TrimSpace(os.Getenv("USAGE_CACHE_TTL")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			cfg.UsageCacheTTL = d
+		} else {
+			cfg.UsageCacheTTL = -1 // validateConfig reports the typo
+		}
+	}
 	if v := os.Getenv("SMTP_HOST"); v != "" {
 		cfg.SMTP.Host = v
 	}
@@ -309,6 +330,9 @@ func validateConfig(cfg Config) error {
 	}
 	if cfg.UpstreamResponseHeaderTimeout < 0 {
 		return errors.New("UPSTREAM_RESPONSE_HEADER_TIMEOUT must be >= 0")
+	}
+	if cfg.UsageCacheTTL < 0 {
+		return errors.New("USAGE_CACHE_TTL must be >= 0")
 	}
 	return nil
 }
@@ -582,10 +606,11 @@ type App struct {
 	keys   *KeyManager
 	client *http.Client
 	sender *SMTPNotifier
+	usage  *usageCache
 }
 
 func newApp(cfg Config) *App {
-	return &App{config: cfg, keys: NewKeyManager(cfg.UpstreamAPIKeys, cfg.RetryExhaustedAfter), client: &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: cfg.UpstreamResponseHeaderTimeout, ExpectContinueTimeout: 2 * time.Second}}, sender: NewSMTPNotifier(cfg.SMTP)}
+	return &App{config: cfg, keys: NewKeyManager(cfg.UpstreamAPIKeys, cfg.RetryExhaustedAfter), client: &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: cfg.UpstreamResponseHeaderTimeout, ExpectContinueTimeout: 2 * time.Second}}, sender: NewSMTPNotifier(cfg.SMTP), usage: newUsageCache()}
 }
 
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -595,6 +620,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	case r.URL.Path == "/readyz":
 		a.handleReadyz(w, r)
+	case r.URL.Path == "/status" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		a.handleStatusPage(w, r)
 	case strings.HasPrefix(r.URL.Path, "/admin/"):
 		if !a.authOK(r) {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "Unauthorized")
@@ -651,6 +678,8 @@ func (a *App) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		a.handleResetKey(w, r)
 	case r.URL.Path == "/admin/reset-all-keys" && r.Method == http.MethodPost:
 		a.handleResetAllKeys(w, r)
+	case r.URL.Path == "/admin/keys" && r.Method == http.MethodGet:
+		a.handleKeysReport(w, r)
 	case r.URL.Path == "/admin/status" && r.Method == http.MethodGet:
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(a.keys.Status())
@@ -764,7 +793,7 @@ func (a *App) handleValidateKeys(w http.ResponseWriter, r *http.Request) {
 			resp.Body.Close()
 			a.keys.MarkAvailable(i)
 			res.State = string(KeyAvailable)
-		} else if resp.StatusCode == http.StatusTooManyRequests && isQuota429(resp) {
+		} else if isKeyDead(resp) {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			a.keys.SetState(i, KeyExhausted)
@@ -805,7 +834,7 @@ func (a *App) proxyV1(w http.ResponseWriter, r *http.Request, style APIStyle) {
 			http.Error(w, reqErr.Error(), http.StatusBadGateway)
 			return
 		}
-		if resp.StatusCode == http.StatusTooManyRequests && isQuota429(resp) {
+		if isKeyDead(resp) {
 			_ = resp.Body.Close()
 			a.keys.MarkExhausted(idx)
 			if a.keys.ShouldNotifySwitch(idx) {
@@ -845,6 +874,9 @@ func (a *App) doUpstream(ctx context.Context, r *http.Request, body []byte, key 
 		return nil, err
 	}
 	copyHeaders(req.Header, r.Header)
+	// Let the Transport negotiate gzip itself: it only decompresses transparently
+	// when it set Accept-Encoding, and isKeyDead needs to read the plain body.
+	req.Header.Del("Accept-Encoding")
 	if apiStyle == APIStyleAnthropic {
 		req.Header.Set("x-api-key", key)
 		if strings.TrimSpace(req.Header.Get("anthropic-version")) == "" {
@@ -937,6 +969,19 @@ func copyResponse(w http.ResponseWriter, resp *http.Response) {
 	} else {
 		_, _ = io.Copy(w, resp.Body)
 	}
+}
+
+// isKeyDead reports whether the upstream response means this key cannot serve
+// requests and the next one should be tried: a quota 429, or the 403 OpenCode Go
+// returns when the key's subscription is gone. Like isQuota429, it restores resp.Body.
+func isKeyDead(resp *http.Response) bool {
+	if resp.StatusCode != http.StatusForbidden {
+		return isQuota429(resp)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	return strings.Contains(strings.ToLower(string(body)), "subscription is required")
 }
 
 func isQuota429(resp *http.Response) bool {

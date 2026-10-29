@@ -147,10 +147,13 @@ Use `Authorization: Bearer $PROXY_API_KEY`:
 - `GET /admin/status`
 - `POST /admin/validate-keys`
 
-Health checks:
+Open routes, no authentication:
 
 - `GET /healthz`
 - `GET /readyz`
+- `GET /status`: HTML page with the state, cooldown and usage of each key. It
+  never shows key values. If the proxy has a public URL, restrict the port at
+  the network level.
 
 See [docs/admin-api.md](docs/admin-api.md).
 
