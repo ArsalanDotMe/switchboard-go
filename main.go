@@ -794,6 +794,8 @@ func (a *App) proxyV1(w http.ResponseWriter, r *http.Request, style APIStyle) {
 		return
 	}
 	_ = r.Body.Close()
+	// Generate standalone verification IDs once, also across key retries.
+	addSessionCompatibility(r, body)
 	orig := r.Context()
 	for attempts := 0; attempts < len(a.config.UpstreamAPIKeys); attempts++ {
 		idx, key, ok := a.keys.Current()
@@ -860,6 +862,7 @@ func (a *App) doUpstream(ctx context.Context, r *http.Request, body []byte, key 
 		}
 	}
 	stripHopByHopHeaders(req.Header)
+	addSessionCompatibility(req, body)
 	return a.client.Do(req)
 }
 
