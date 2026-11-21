@@ -1,0 +1,21 @@
+[[entry]]
+id = 1
+type = "story"
+title = "Página /status com o estado e o uso de cada chave"
+description = "Extrai a montagem do relatório de chaves de handleKeysReport e serve GET /status, rota nova fora de /admin/ e sem autenticação, como HTML renderizado no servidor (html/template com o HTML embutido no código) com nome (ou posição, se a chave não tem nome), estado, cooldown e uso de cada chave; o template trata uso ausente e erro de uso de uma chave aparece na linha dela."
+verify = "go test passa com casos para: /status sem chave devolve a página, /admin/keys sem chave devolve 401, o corpo de /status não contém o valor de nenhuma chave, e o upstream de uso falhando para uma chave mostra o erro na linha dela. Com o proxy rodando, abrir /status mostra cada chave com estado, cooldown e uso."
+covers = ["R1", "R2", "R3"]
+after = []
+hitl = false
+risk = "low"
+
+[[entry]]
+id = 2
+type = "story"
+title = "Verificar /status na imagem Docker e documentar"
+description = "Verifica que /status funciona na imagem Docker sem arquivo externo e documenta a página: acrescenta /status à lista de rotas de docs/operations.md e do README, diz que é aberta e que, com URL público, a porta deve ser restrita por rede."
+verify = "Subir a imagem Docker, abrir /status e ver as chaves; docs/operations.md e o README listam /status como rota aberta e trazem o aviso de rede."
+covers = ["R4"]
+after = [1]
+hitl = false
+risk = "low"

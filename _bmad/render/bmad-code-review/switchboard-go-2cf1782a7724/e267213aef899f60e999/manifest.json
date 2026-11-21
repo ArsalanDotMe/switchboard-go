@@ -1,0 +1,72 @@
+{
+  "generation_hash": "e267213aef899f60e999",
+  "inputs": {
+    "jinja2_version": "3.1.6",
+    "project_root": "/Users/eduardomenoncello/Documents/projects/switchboard-go",
+    "renderer_sha256": "82b4d567c335a596d086d94b4772d0a4a9e09065f84b45c3647276593d02552c",
+    "resolved_values": {
+      "config.core.output_folder": "/Users/eduardomenoncello/Documents/projects/switchboard-go/_bmad-output",
+      "customization.workflow.activation_steps_append": [],
+      "customization.workflow.activation_steps_prepend": [],
+      "customization.workflow.fixes": "apply",
+      "customization.workflow.interactive": true,
+      "customization.workflow.on_complete": "",
+      "customization.workflow.persistent_facts": [],
+      "customization.workflow.review": "thorough",
+      "customization.workflow.thorough_lenses": [
+        {
+          "id": "blind-hunter",
+          "instruction": "Launch a context-free subagent with this prompt:\n\nConduct a review of CONTENT.\nLook for what's missing, not only what's wrong.\nCompute your finding floor N from the diff file's size: N = min(floor(sqrt(kB) + 1), 10), where kB is the file's size in kilobytes. State the arithmetic in one line, then find at least N issues to fix or improve.\nOutput a Markdown list of findings only — no severity, priority, or ranking.\nIf the content is empty, stop and say so.\nIf you have zero findings, re-check and keep thinking; do not stop with an empty list.\n\nCONTENT: the unified diff at `{diff_file}`. Read that file — it is the content under review.\n\nReview by inspection only. Do not modify code, run builds or tests, or invoke quality gates. Do not invoke any skill, and do not spawn subagents of your own — you are the reviewer. Return your findings as text in your final message; do not route them through any findings-reporting tool the host may offer.\n\n",
+          "name": "Blind Hunter"
+        },
+        {
+          "id": "edge-case-hunter",
+          "instruction": "Launch a context-free subagent with this prompt:\n\nRead `{skill-root}/review-prompts/edge-case-hunter.md` completely and follow it as your review instructions.\n\nclaims_file (leave unread until your instructions call for it): {claims_file}\n\nReview content: the unified diff at `{diff_file}`. Read that file — it is the content under review.\n\nReview by inspection only. Do not modify code, run builds or tests, or invoke quality gates. Do not invoke any skill, and do not spawn subagents of your own — you are the reviewer. If the instruction file is unreadable, report that exact failure and stop. Return your findings as text in your final message; do not route them through any findings-reporting tool the host may offer.\n\n",
+          "name": "Edge Case Hunter"
+        },
+        {
+          "id": "verification-gap",
+          "instruction": "Launch a context-free subagent with this prompt:\n\nRead `{skill-root}/review-prompts/verification-gap.md` completely and follow it as your review instructions.\n\nReview content: the unified diff at `{diff_file}`. Read that file — it is the content under review.\n\nReview by inspection only. Do not modify code, run builds or tests, or invoke quality gates. Do not invoke any skill, and do not spawn subagents of your own — you are the reviewer. If the instruction file is unreadable, report that exact failure and stop. Return your findings as text in your final message; do not route them through any findings-reporting tool the host may offer.\n\n",
+          "name": "Verification Gap Reviewer"
+        },
+        {
+          "id": "intent-alignment",
+          "instruction": "Launch a subagent with this prompt:\n\nYou are an intent-alignment auditor. You have no other context about how this change was produced. Here is the verbatim intent this work started from:\n\n{verbatim_intent}\n\nThe diff is the unified diff at `{diff_file}`. Read that file — it is the change under review.\n\nYour task is strictly descriptive — do not prescribe additional work. Report: (1) the defensible readings of the intent, enumerated; (2) which reading this diff implements; (3) where the readings and the diff diverge — specifically, which surface the intent's expectations live at versus which surface the diff's changes and its tests exercise.\n\nReview by inspection only. Do not modify code, run builds or tests, or invoke quality gates. Do not invoke any skill, and do not spawn subagents of your own — you are the reviewer. Return your findings as text in your final message; do not route them through any findings-reporting tool the host may offer.\n\n",
+          "name": "Intent Alignment Auditor",
+          "when": "an intent is available: the ticket's Requirements, the plan's intent section, or the user's or conversation's own words on what the change is for"
+        }
+      ],
+      "initiative_folder": "/Users/eduardomenoncello/Documents/projects/switchboard-go/_bmad-output/initiative-multi-provider"
+    },
+    "skill_root": "/Users/eduardomenoncello/Documents/projects/switchboard-go/.agents/skills/bmad-code-review",
+    "source_sha256": {
+      "references/claims-check.md": "7be5d35dd90a1950addc2062acdf8669026b239117efe1e398da1e8161cfa6f9",
+      "references/deletion-check.md": "0f1f124e4e957147e89164a272b10bedc694ad0d9ad2618c8610ac74ee9cb0da",
+      "review-prompts/edge-case-hunter.md": "5f4572d57340b4c0d155f33454d644a44af101cd7fd02a01591be68a4ebb8b7f",
+      "review-prompts/verification-gap.md": "3ba70ad39f8663b83c599814ad52f28bbbc50ddf137b4762037c9b30ed84a34e",
+      "step-01-gather-context.md": "e792523473a0bc8d2c5239b44ed9b7646ce305d9f5e572ddc0ed72fc25df621a",
+      "step-02-review.md": "db0394f512035be9a2f311cdf8488ff228d508305efdc58b58eb35225f7a88de",
+      "step-03-triage.md": "950b8c0faa9ede279a16aa5c741f903792b849836413ac7ee79a4b57503e29cf",
+      "step-04-route.md": "554d56a219c27a32336f1d6c5ca21acc7bebdba7bb53e85e0537cc858a19a04d",
+      "step-05-present.md": "f3379d41fd82dce11c7ee80809ebed03435579291323caf2b4e947a1894f53b7",
+      "workflow.md": "8d12706a762292c03a9dc67bc81d003ca09aa7ae26ce7d3af56f51198f0319f9"
+    }
+  },
+  "outputs": {
+    "references/claims-check.md": "7be5d35dd90a1950addc2062acdf8669026b239117efe1e398da1e8161cfa6f9",
+    "references/deletion-check.md": "0f1f124e4e957147e89164a272b10bedc694ad0d9ad2618c8610ac74ee9cb0da",
+    "review-prompts/edge-case-hunter.md": "5f4572d57340b4c0d155f33454d644a44af101cd7fd02a01591be68a4ebb8b7f",
+    "review-prompts/verification-gap.md": "3ba70ad39f8663b83c599814ad52f28bbbc50ddf137b4762037c9b30ed84a34e",
+    "step-01-gather-context.md": "22935de9dc0aa45bc3e2715e01daf8980cab916f722a404826a7d2fc48b497ca",
+    "step-02-review.md": "755a82fc0bc22abe73f6bd2581d1d8d0cb3611cc257bf3575725bc45ad376894",
+    "step-03-triage.md": "5c0c6e264638d37ee1fd1ea8b3bef8386743add55da56ec2d3cda1a256fdbd3f",
+    "step-04-route.md": "44c63154a0779a04bcd840a214804260482b2b2075d51a03155dfae1951355dc",
+    "step-05-present.md": "05ec1b8db62f5f68edb9a51c9eb7a1475fa2184acc8672c802a17a7116f6083f",
+    "workflow.md": "805bcd99a815a10ee0b2b88704792716e79fae28da51e55a27bc1f4c16b689be"
+  },
+  "project_root": "/Users/eduardomenoncello/Documents/projects/switchboard-go",
+  "project_slug": "switchboard-go",
+  "root_hash": "2cf1782a7724",
+  "schema_version": 1,
+  "skill": "bmad-code-review"
+}

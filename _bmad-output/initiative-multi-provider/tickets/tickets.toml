@@ -1,0 +1,33 @@
+# Épicos da iniciativa multi-provider, em ordem de construção.
+# R15 (recarga por SIGHUP) fica fora: ticket avulso em backlog/, decisão do Eduardo.
+
+[[epic]]
+id = 1
+slug = "epic-pagina-de-status"
+title = "O Eduardo vê o estado das chaves numa página"
+description = "Uma página HTML renderizada no servidor mostra o estado, o cooldown e o uso de cada chave, sem expor API nova e sem abrir o /admin."
+covers = ["R12"]
+
+[[epic]]
+id = 2
+slug = "epic-roteamento-por-tiers"
+title = "O proxy troca de provedor quando um falha"
+description = "Com a cota do OpenCode Go esgotada, uma request do Hermes é atendida pelo próximo tier com modelo mapeado, com teto diário nos pagos, sem mudar os agentes. Entrega ao relatório e ao catálogo: o log por request, o estado persistido (cooldown e gasto do dia), a lista de tiers e o formato da config. Entrega à página: a seção de tiers."
+covers = ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R10", "R11"]
+after = [{ epic = 1, needs = "a página de status, que lê KeyManager.Status() (reescrito aqui) e recebe a seção de tiers" }]
+
+[[epic]]
+id = 3
+slug = "epic-relatorio-de-uso-e-custo"
+title = "O Eduardo sabe quanto cada projeto e modelo usou e custou"
+description = "Um relatório agrega uso e custo por dia, projeto, modelo, chave e tier, e a página de status o mostra; o projeto vem do cabeçalho opcional X-Project. Estende o log do roteamento com projeto e tokens e é dono do histórico de uso e da tabela de preços."
+covers = ["R13", "R14"]
+after = [{ epic = 2, needs = "o log estruturado, a persistência do gasto e a lista de tiers" }]
+
+[[epic]]
+id = 4
+slug = "epic-catalogo-automatico"
+title = "O Eduardo recebe propostas de modelos e limites novos"
+description = "Uma automação recorrente pesquisa modelos novos, limites novos e quem deixou de ser gratuito, e propõe mudanças na config sem tocar no roteamento."
+covers = ["R9"]
+after = [{ epic = 2, needs = "o formato da config de tiers" }, { epic = 3, needs = "o formato da tabela de preços, que as propostas de limite e gratuidade atualizam" }]

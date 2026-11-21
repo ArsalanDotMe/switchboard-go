@@ -2,12 +2,16 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
+	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -828,5 +832,491 @@ func TestCopyResponseDoesNotFlushNormalJSON(t *testing.T) {
 	expectedBody := `{"choices": [{"message": {"content": "Hello World"}}]}`
 	if rec.Body.String() != expectedBody {
 		t.Fatalf("unexpected body: got %q", rec.Body.String())
+	}
+}
+
+const subscriptionRequired403 = `{"error":{"message":"Upstream request failed: An active OpenCode Go subscription is required to use Go models"}}`
+
+func TestIsKeyDead403Subscription(t *testing.T) {
+	resp := &http.Response{StatusCode: 403, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(subscriptionRequired403))}
+	if !isKeyDead(resp) {
+		t.Fatal("expected 403 subscription-required to be a dead key")
+	}
+	other := `{"error":{"message":"forbidden"}}`
+	resp = &http.Response{StatusCode: 403, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(other))}
+	if isKeyDead(resp) {
+		t.Fatal("expected other 403 not to be a dead key")
+	}
+	if got, _ := io.ReadAll(resp.Body); string(got) != other {
+		t.Fatalf("body not restored: %q", got)
+	}
+	resp = &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(subscriptionRequired403))}
+	if isKeyDead(resp) {
+		t.Fatal("expected 200 not to be a dead key")
+	}
+}
+
+func TestProxyRotatesOn403SubscriptionRequired(t *testing.T) {
+	var gotKeys []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKeys = append(gotKeys, r.Header.Get("Authorization"))
+		if r.Header.Get("Authorization") == "Bearer bad" {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(subscriptionRequired403))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"bad", "good"}, UpstreamBaseURL: upstream.URL, MaxRequestBodyBytes: 1024})
+	rec := doProxyReq(app)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body %s", rec.Code, rec.Body.String())
+	}
+	if strings.Join(gotKeys, ",") != "Bearer bad,Bearer good" {
+		t.Fatalf("unexpected keys: %v", gotKeys)
+	}
+	st := app.keys.Status()
+	if st.Keys[0].State != string(KeyExhausted) || st.Keys[1].State != string(KeyAvailable) {
+		t.Fatalf("unexpected key states: %+v", st.Keys)
+	}
+}
+
+func TestProxyPassesThroughOther403(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"message":"model not allowed"}}`))
+	}))
+	defer upstream.Close()
+
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"k1", "k2"}, UpstreamBaseURL: upstream.URL, MaxRequestBodyBytes: 1024})
+	rec := doProxyReq(app)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "model not allowed") {
+		t.Fatalf("expected 403 passthrough, got %d body %s", rec.Code, rec.Body.String())
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("expected a single upstream call, got %d", calls.Load())
+	}
+	if st := app.keys.Status(); st.Keys[0].State != string(KeyAvailable) {
+		t.Fatalf("expected key 0 available, got %+v", st.Keys[0])
+	}
+}
+
+func TestProxyAllKeys403SubscriptionExhausted(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(subscriptionRequired403))
+	}))
+	defer upstream.Close()
+
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"k1", "k2"}, UpstreamBaseURL: upstream.URL, MaxRequestBodyBytes: 1024})
+	rec := doProxyReq(app)
+	if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), "all upstream keys exhausted") {
+		t.Fatalf("expected 429 all exhausted, got %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestValidateKeysMarksExhaustedOn403Subscription(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer good" {
+			_, _ = w.Write([]byte(`{"data":[]}`))
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(subscriptionRequired403))
+	}))
+	defer upstream.Close()
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"good", "bad"}, UpstreamBaseURL: upstream.URL, MaxRequestBodyBytes: 1})
+	req := httptest.NewRequest(http.MethodPost, "/admin/validate-keys", nil)
+	req.Header.Set("Authorization", "Bearer p")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	var out ValidateKeysResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Results) != 2 || out.Results[0].State != string(KeyAvailable) || out.Results[1].State != string(KeyExhausted) {
+		t.Fatalf("unexpected results: %+v", out.Results)
+	}
+}
+
+func TestProxyRotatesOn403SubscriptionCompressed(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer bad" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			w.Header().Set("Content-Encoding", "gzip")
+			w.WriteHeader(http.StatusForbidden)
+			zw := gzip.NewWriter(w)
+			_, _ = zw.Write([]byte(subscriptionRequired403))
+			_ = zw.Close()
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(subscriptionRequired403))
+	}))
+	defer upstream.Close()
+
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"bad", "good"}, UpstreamBaseURL: upstream.URL, MaxRequestBodyBytes: 1024})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.1","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer p")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProxyDecompressesUpstreamBodyForClient(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		zw := gzip.NewWriter(w)
+		_, _ = zw.Write([]byte(`{"ok":true}`))
+		_ = zw.Close()
+	}))
+	defer upstream.Close()
+
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"k1"}, UpstreamBaseURL: upstream.URL, MaxRequestBodyBytes: 1024})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer p")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Body.String() != `{"ok":true}` || rec.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("expected plain body without Content-Encoding, got %q (%q)", rec.Body.String(), rec.Header().Get("Content-Encoding"))
+	}
+}
+
+func TestProxyStreamsSSEFromGzipUpstream(t *testing.T) {
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Encoding", "gzip")
+		zw := gzip.NewWriter(w)
+		_, _ = zw.Write([]byte("data: one\n\n"))
+		_ = zw.Flush()
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-time.After(5 * time.Second):
+		}
+		_, _ = zw.Write([]byte("data: two\n\n"))
+		_ = zw.Close()
+	}))
+	defer upstream.Close()
+
+	srv := httptest.NewServer(newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"k1"}, UpstreamBaseURL: upstream.URL, MaxRequestBodyBytes: 1024}))
+	defer srv.Close()
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer p")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	first := make(chan string, 1)
+	go func() {
+		buf := make([]byte, len("data: one\n\n"))
+		_, _ = io.ReadFull(resp.Body, buf)
+		first <- string(buf)
+	}()
+	select {
+	case got := <-first:
+		if got != "data: one\n\n" {
+			t.Fatalf("unexpected first event %q", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first SSE event not streamed before upstream finished")
+	}
+	close(release)
+	rest, _ := io.ReadAll(resp.Body)
+	if string(rest) != "data: two\n\n" {
+		t.Fatalf("unexpected rest %q", rest)
+	}
+}
+
+const fakeUsageBody = `{"usage":{"rolling":{"percent":12.5,"resetsAt":"2026-10-25T12:00:00Z"},"weekly":{"percent":40,"resetsAt":"2026-10-27T00:00:00Z"},"monthly":{"percent":7,"resetsAt":"2026-11-01T00:00:00Z"}}}`
+
+// fakeUsageServer answers /usage per Bearer key: "sk-good*" gets windows, "sk-bad*" gets 401.
+func fakeUsageServer(t *testing.T, hits *int32) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(hits, 1)
+		if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer sk-good") {
+			_, _ = w.Write([]byte(fakeUsageBody))
+			return
+		}
+		http.Error(w, "nope", http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func getKeysReport(t *testing.T, app *App) (int, string, KeysReportResponse) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/admin/keys", nil)
+	req.Header.Set("Authorization", "Bearer p")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	var out KeysReportResponse
+	if rec.Code == http.StatusOK {
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return rec.Code, rec.Body.String(), out
+}
+
+func TestAdminKeysUsageSuccess(t *testing.T) {
+	var hits int32
+	srv := fakeUsageServer(t, &hits)
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"sk-good-1", "sk-good-2"}, KeyNames: []string{"principal", "reserva"}, UsageURL: srv.URL, UsageCacheTTL: time.Minute, RetryExhaustedAfter: time.Hour})
+	app.keys.MarkExhausted(1)
+	code, body, out := getKeysReport(t, app)
+	if code != http.StatusOK {
+		t.Fatalf("got %d %s", code, body)
+	}
+	if len(out.Keys) != 2 || out.GeneratedAt == "" || out.UsageCachedSeconds != 60 {
+		t.Fatalf("unexpected report: %s", body)
+	}
+	k0, k1 := out.Keys[0], out.Keys[1]
+	if k0.Name != "principal" || !k0.Eligible {
+		t.Fatalf("key 0: %+v", k0)
+	}
+	if k1.Name != "reserva" || k1.State != "exhausted" || k1.Eligible || k1.Last429Time == "" {
+		t.Fatalf("key 1: %+v", k1)
+	}
+	u := k0.Usage
+	if u == nil || u.Rolling.Percent != 12.5 || u.Weekly.Percent != 40 || u.Monthly.Percent != 7 {
+		t.Fatalf("usage: %+v", u)
+	}
+	if string(u.Weekly.ResetsAt) != `"2026-10-27T00:00:00Z"` {
+		t.Fatalf("resets_at: %s", u.Weekly.ResetsAt)
+	}
+	if !strings.Contains(body, `"resets_at"`) || strings.Contains(body, "resetsAt") {
+		t.Fatalf("expected snake_case resets_at: %s", body)
+	}
+}
+
+func TestAdminKeysOneKeyErrorOneGood(t *testing.T) {
+	var hits int32
+	srv := fakeUsageServer(t, &hits)
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"sk-bad-secret", "sk-good-secret"}, UsageURL: srv.URL})
+	_, body, out := getKeysReport(t, app)
+	if out.Keys[0].UsageError != "HTTP 401" || out.Keys[0].Usage != nil {
+		t.Fatalf("key 0: %+v", out.Keys[0])
+	}
+	if out.Keys[1].UsageError != "" || out.Keys[1].Usage == nil {
+		t.Fatalf("key 1: %+v", out.Keys[1])
+	}
+	if out.Keys[0].Name != "" || out.Keys[1].Name != "" {
+		t.Fatalf("names should be empty: %s", body)
+	}
+}
+
+func TestAdminKeysNeverLeaksKeyValue(t *testing.T) {
+	var hits int32
+	srv := fakeUsageServer(t, &hits)
+	dead := httptest.NewServer(http.NotFoundHandler())
+	deadURL := dead.URL
+	dead.Close() // connection refused: the url.Error text would carry the URL, not the key
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+	for _, usageURL := range []string{srv.URL, deadURL} {
+		app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"sk-bad-SEGREDO123", "sk-good-SEGREDO456"}, KeyNames: []string{"a", "b"}, UsageURL: usageURL})
+		_, body, _ := getKeysReport(t, app)
+		for _, secret := range []string{"SEGREDO123", "SEGREDO456", "sk-bad", "sk-good"} {
+			if strings.Contains(body, secret) || strings.Contains(logs.String(), secret) {
+				t.Fatalf("leaked %q\nbody: %s\nlogs: %s", secret, body, logs.String())
+			}
+		}
+	}
+	if !strings.Contains(logs.String(), "usage query failed") {
+		t.Fatalf("expected the failure to be logged: %q", logs.String())
+	}
+}
+
+func TestAdminKeysCache(t *testing.T) {
+	var hits int32
+	srv := fakeUsageServer(t, &hits)
+	now := time.Now()
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"sk-good-1", "sk-good-2"}, UsageURL: srv.URL, UsageCacheTTL: time.Minute})
+	app.usage.now = func() time.Time { return now }
+	getKeysReport(t, app)
+	getKeysReport(t, app)
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("expected 2 upstream hits (1 per key), got %d", got)
+	}
+	now = now.Add(61 * time.Second)
+	getKeysReport(t, app)
+	if got := atomic.LoadInt32(&hits); got != 4 {
+		t.Fatalf("expected refresh after TTL (4 hits), got %d", got)
+	}
+}
+
+func TestAdminKeysNamesMissingOrShort(t *testing.T) {
+	var hits int32
+	srv := fakeUsageServer(t, &hits)
+	long := strings.Repeat("x", 60)
+	cfg := Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"sk-good-1", "sk-good-2", "sk-good-3"}, UsageURL: srv.URL, KeyNames: parseKeyNames("principal,\n" + long + "\n")}
+	_, _, out := getKeysReport(t, newApp(cfg))
+	if out.Keys[0].Name != "principal" || out.Keys[1].Name != long[:40] || out.Keys[2].Name != "" {
+		t.Fatalf("names: %q %q %q", out.Keys[0].Name, out.Keys[1].Name, out.Keys[2].Name)
+	}
+	if got := parseKeyNames("a\r\nb, c"); got[0] != "ab" || got[1] != "c" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestAdminKeysAuthAndMethod(t *testing.T) {
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"sk-good-1"}})
+	req := httptest.NewRequest(http.MethodGet, "/admin/keys", nil)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), "invalid_api_key") {
+		t.Fatalf("no bearer: %d %s", rec.Code, rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPost, "/admin/keys", nil)
+	req.Header.Set("Authorization", "Bearer p")
+	rec = httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("POST should not match (same as other admin routes), got %d", rec.Code)
+	}
+}
+
+func getStatusPage(app *App) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
+	return rec
+}
+
+func TestStatusPageOpenAndNoKeyLeak(t *testing.T) {
+	var hits int32
+	srv := fakeUsageServer(t, &hits)
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"sk-good-SEGREDO1", "sk-bad-SEGREDO2"}, KeyNames: []string{"principal"}, UsageURL: srv.URL, UsageCacheTTL: time.Minute, RetryExhaustedAfter: time.Hour})
+	app.keys.MarkExhausted(1)
+	rec := getStatusPage(app)
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("got %d %s", rec.Code, rec.Header().Get("Content-Type"))
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("Cache-Control: %q", rec.Header().Get("Cache-Control"))
+	}
+	for _, want := range []string{"principal", "#2", "exhausted", "<td>12.5%</td>", "<td>40.0%</td>", "<td>7.0%</td>"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in %s", want, body)
+		}
+	}
+	rows := strings.Split(body, "<tr>")
+	if !strings.Contains(rows[2], "(atual)") || regexp.MustCompile(`<td>\d+s</td>`).MatchString(rows[2]) {
+		t.Fatalf("current key row: %s", rows[2])
+	}
+	if !regexp.MustCompile(`<td>\d+s</td>`).MatchString(rows[3]) || strings.Contains(rows[3], "(atual)") {
+		t.Fatalf("exhausted key row: %s", rows[3])
+	}
+	head := httptest.NewRecorder()
+	app.ServeHTTP(head, httptest.NewRequest(http.MethodHead, "/status", nil))
+	if head.Code != http.StatusOK {
+		t.Fatalf("HEAD /status: %d", head.Code)
+	}
+	for _, secret := range []string{"SEGREDO1", "SEGREDO2", "sk-good", "sk-bad"} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("leaked %q: %s", secret, body)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/admin/keys", nil)
+	rec = httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("/admin/keys without key: %d", rec.Code)
+	}
+}
+
+func TestStatusPageUsageErrorOnKeyRow(t *testing.T) {
+	var hits int32
+	srv := fakeUsageServer(t, &hits)
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"sk-bad-1", "sk-good-2"}, UsageURL: srv.URL})
+	rec := getStatusPage(app)
+	body := rec.Body.String()
+	rows := strings.Split(body, "<tr>")
+	if rec.Code != http.StatusOK || len(rows) != 4 {
+		t.Fatalf("got %d %s", rec.Code, body)
+	}
+	if !strings.Contains(rows[2], "erro de uso: HTTP 401") || strings.Contains(rows[2], "%</td>") {
+		t.Fatalf("key #1 row: %s", rows[2])
+	}
+	if !strings.Contains(rows[3], "<td>12.5%</td>") || strings.Contains(rows[3], "erro de uso") {
+		t.Fatalf("key #2 row: %s", rows[3])
+	}
+}
+
+func TestStatusPageEscapesKeyName(t *testing.T) {
+	var hits int32
+	srv := fakeUsageServer(t, &hits)
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"sk-good-1"}, KeyNames: []string{"<b>x</b>"}, UsageURL: srv.URL})
+	body := getStatusPage(app).Body.String()
+	if !strings.Contains(body, "&lt;b&gt;x&lt;/b&gt;") || strings.Contains(body, "<b>x</b>") {
+		t.Fatalf("name not escaped: %s", body)
+	}
+}
+
+func TestStatusPagePartialWindows(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"usage":{"weekly":{"percent":40}}}`))
+	}))
+	t.Cleanup(srv.Close)
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"sk-good-1"}, UsageURL: srv.URL})
+	rec := getStatusPage(app)
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK || !strings.Contains(body, "<td>40.0%</td>") || !strings.Contains(body, "<td>—</td>") {
+		t.Fatalf("got %d %s", rec.Code, body)
+	}
+}
+
+func TestUsageForCancelledRequestDoesNotPoisonCache(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&hits, 1) == 1 {
+			<-r.Context().Done() // slow upstream: hold until the client gives up
+			return
+		}
+		_, _ = w.Write([]byte(fakeUsageBody))
+	}))
+	t.Cleanup(srv.Close)
+	app := newApp(Config{ProxyAPIKey: "p", UpstreamAPIKeys: []string{"sk-good-1"}, UsageURL: srv.URL, UsageCacheTTL: time.Minute})
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	if got := app.usageFor(ctx); len(got) != 1 || got[0].err == "" {
+		t.Fatalf("expected a cancel error for this response only: %+v", got)
+	}
+	got := app.usageFor(context.Background())
+	if got[0].err != "" || got[0].usage == nil || atomic.LoadInt32(&hits) != 2 {
+		t.Fatalf("expected a refetch after cancel: %+v hits=%d", got, atomic.LoadInt32(&hits))
+	}
+}
+
+func TestUsageCacheTTLEnv(t *testing.T) {
+	t.Setenv("USAGE_CACHE_TTL", "5x")
+	cfg := defaultConfig()
+	applyEnvOverrides(&cfg)
+	cfg.ProxyAPIKey, cfg.UpstreamAPIKeys = "p", []string{"k"}
+	if err := validateConfig(cfg); err == nil {
+		t.Fatal("expected invalid USAGE_CACHE_TTL to fail validation")
+	}
+	if d := defaultConfig(); d.UsageCacheTTL != 60*time.Second || d.UsageURL != "https://opencode.ai/zen/go/v1/usage" {
+		t.Fatalf("defaults: %+v", d)
 	}
 }

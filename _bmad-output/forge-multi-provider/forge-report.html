@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Forge: multi-provider no switchboard-go</title>
+<style>
+  body { font: 16px/1.55 Georgia, serif; max-width: 760px; margin: 2.5rem auto; padding: 0 1.25rem; color: #1d1d1f; background: #faf7f0; }
+  h1 { margin-bottom: .2rem; }
+  h2 { margin-top: 2rem; border-bottom: 1px solid #d8cfbd; padding-bottom: .2rem; }
+  .sub { color: #6b6455; margin-top: 0; }
+  .seal { float: right; margin: 0 0 1rem 1rem; }
+  li { margin: .35rem 0; }
+  code { background: #efe8d8; padding: 0 .25em; border-radius: 3px; }
+</style>
+</head>
+<body>
+<svg class="seal" width="130" height="130" viewBox="0 0 130 130" role="img" aria-label="HARDENED">
+  <circle cx="65" cy="65" r="58" fill="#8b1e2d"/>
+  <circle cx="65" cy="65" r="50" fill="none" stroke="#f3d9c9" stroke-width="2"/>
+  <circle cx="65" cy="65" r="44" fill="none" stroke="#f3d9c9" stroke-width="1" stroke-dasharray="3 3"/>
+  <text x="65" y="72" text-anchor="middle" font-family="Georgia, serif" font-weight="bold" font-size="17" fill="#f3d9c9" letter-spacing="1">HARDENED</text>
+</svg>
+
+<h1>Multi-provider no switchboard-go</h1>
+<p class="sub">Sessão de forja · trabalho avulso · objetivo: clarificar as possibilidades de incluir outros provedores além do OpenCode Go</p>
+
+<h2>Resultado</h2>
+<p>A ideia resistiu e ficou específica o bastante para usar. O proxy passa a ter tiers de prioridade (OpenCode Go = 0, depois outros provedores e tiers gratuitos), sem tocar na configuração dos agentes Hermes.</p>
+
+<h2>Decisões travadas</h2>
+<ul>
+  <li>Tiers de prioridade na ordem da config.</li>
+  <li>Cada tier tem um mapa de modelos. Sem mapeamento, o tier é pulado. A substituição é aceita porque só o Eduardo usa.</li>
+  <li>Sem tradução entre OpenAI-style e Anthropic-style. Cada tier declara os estilos que fala.</li>
+  <li>Toda a config fica no proxy. Os agentes mantêm o mesmo URL e a mesma <code>PROXY_API_KEY</code>.</li>
+  <li>Tier pago exige teto diário global, compartilhado entre agentes. Sem ele a config é inválida. O primeiro uso dispara o alerta SMTP.</li>
+  <li>Tiers gratuitos entram como <code>free: true</code>, sem proxy key por agente, porque nenhum agente lida com dado sensível.</li>
+  <li>Falha do upstream (429, 5xx, 401, 402, 404) conta como rate limit: cooldown e próximo tier. O 400 não faz failover.</li>
+  <li>Elegibilidade de modelo: mínimo de contexto e tool calling que o Hermes precisa.</li>
+  <li>A automação de catálogo (modelos novos, limites, quem deixou de ser gratuito) só propõe. A auto-adição fica para depois, começando pelo OpenRouter.</li>
+</ul>
+
+<h2>Rejeitado e por quê</h2>
+<ul>
+  <li><b>Cadeia de fallback por request:</b> obrigaria configurar cada agente.</li>
+  <li><b>Só o mesmo modelo:</b> deixaria OpenAI e Anthropic quase sempre de fora.</li>
+  <li><b>Tradução entre estilos de API:</b> caro (SSE, tools) e desnecessário para o Hermes.</li>
+  <li><b>Proxy key por agente:</b> adiada, sem necessidade hoje.</li>
+</ul>
+
+<h2>Pontos fracos que sobreviveram</h2>
+<ul>
+  <li><b>Gasto silencioso:</b> um modelo gratuito que vira pago só é detectável por API no OpenRouter. Nos demais, depende de página de documentação. Mitigação: a automação só propõe.</li>
+  <li><b>Teto compartilhado:</b> um agente em loop pode consumir o teto de todos no dia.</li>
+  <li><b>Estilo real do Hermes</b> não verificado: confirmar nos logs do proxy. Modelos como MiniMax podem usar <code>/v1/messages</code>.</li>
+  <li><b>Cooldown dos tiers gratuitos</b> ainda por definir (o 429 deles é por minuto ou por dia).</li>
+</ul>
+
+<h2>Participantes</h2>
+<p>Sem personas nomeadas nesta sessão: o questionamento foi conduzido diretamente, uma pergunta por vez, a partir do código do projeto.</p>
+</body>
+</html>
